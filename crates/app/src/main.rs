@@ -1187,6 +1187,26 @@ fn push_gap_rows(
     }
 }
 
+/// Stable signature of one file's diff: hashes path + each hunk's line ranges
+/// and row texts. Changes iff the file's diff changes, so it's used to
+/// auto-reset "viewed" when a file is touched again.
+fn file_signature(file: &FileDiff) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    file.display_path().hash(&mut h);
+    for hunk in &file.hunks {
+        (hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count).hash(&mut h);
+        for row in &hunk.rows {
+            match row {
+                DiffRow::Context { text, .. }
+                | DiffRow::Added { text, .. }
+                | DiffRow::Removed { text, .. } => text.hash(&mut h),
+            }
+        }
+    }
+    h.finish()
+}
+
 /// Flatten the diff into display rows plus the row indices of file headers and
 /// hunk headers. Split mode pairs removed/added runs positionally into
 /// two-cell rows; unequal runs leave one-sided rows. Files present in
@@ -2522,6 +2542,16 @@ fn render_tree_row(
     }
 }
 
+/// The store's key for this item's "viewed" state: stable across refreshes
+/// (doesn't depend on loaded metadata), distinct per PR and per local
+/// repo+base pairing.
+fn review_id(source: &Source) -> String {
+    match source {
+        Source::Pr(loc) => format!("{}#{}", loc.repo_slug(), loc.number),
+        Source::Local(src) => format!("{}@{}", src.repo_root.display(), src.base_label),
+    }
+}
+
 /// Where a review item's diff comes from.
 #[derive(Clone)]
 enum Source {
@@ -2618,6 +2648,13 @@ struct ItemData {
     source_view: Option<SourceViewState>,
     nav_back: Vec<NavLocation>,
     nav_forward: Vec<NavLocation>,
+    /// This item's key into `Store::viewed`, stable across refreshes.
+    review_id: String,
+    /// Indices into `diff.files` the reviewer has marked viewed. Resolved
+    /// from the store (via [`ItemData::resolve_viewed`]) whenever the diff
+    /// loads or refreshes; a file drops out automatically when its
+    /// signature no longer matches (i.e. its diff changed).
+    viewed: HashSet<usize>,
 }
 
 impl ItemData {
@@ -2736,6 +2773,23 @@ impl ItemData {
         self.tree = tree;
         self.tree_last_file = None;
     }
+
+    /// Recompute `viewed` from the store: a file counts as viewed only while
+    /// its current signature matches what was last marked viewed, so a file
+    /// that changed since (new commits) resets on its own. Called right
+    /// after the diff is installed or refreshed.
+    fn resolve_viewed(&mut self, store: &Store) {
+        self.viewed = self
+            .diff
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| {
+                store.is_viewed(&self.review_id, file.display_path(), file_signature(file))
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+    }
 }
 
 struct ReviewItem {
@@ -2795,7 +2849,7 @@ impl ReviewItem {
 
     /// Swap fetched data in. On refresh (already Ready) scroll position,
     /// cursor, and view mode are preserved.
-    fn install(&mut self, loaded: Loaded) {
+    fn install(&mut self, loaded: Loaded, store: &Store) {
         let Loaded {
             meta,
             diff,
@@ -2856,6 +2910,10 @@ impl ReviewItem {
                 data.deletions = deletions;
                 data.selection = None;
                 data.rebuild_tree();
+                // The base/branch may have moved (local refresh) and files may
+                // have changed since — re-key and re-resolve viewed state.
+                data.review_id = review_id(&self.source);
+                data.resolve_viewed(store);
             }
             _ => {
                 let minimap = minimap_rows(&rows);
@@ -2908,8 +2966,11 @@ impl ReviewItem {
                     source_view: None,
                     nav_back: Vec::new(),
                     nav_forward: Vec::new(),
+                    review_id: review_id(&self.source),
+                    viewed: HashSet::new(),
                 });
                 data.rebuild_tree();
+                data.resolve_viewed(store);
                 self.state = ItemState::Ready(data);
             }
         }
@@ -4734,7 +4795,7 @@ impl ReviewApp {
                 item.reloading = false;
                 match fetched {
                     Ok(loaded) => {
-                        item.install(loaded);
+                        item.install(loaded, &app.store);
                         restart_lsp = true;
                         // Phase 2: after the instant patch-derived paint,
                         // upgrade every eligible file to full contents in the
@@ -9415,6 +9476,59 @@ index 0000000..1111111 100644
         // `sh` is always on a test runner's PATH; a bogus name never is.
         assert!(which_on_path("sh").is_some());
         assert!(which_on_path("lgtm-no-such-binary-xyzzy").is_none());
+    }
+
+    #[test]
+    fn file_signature_stable_and_changes_with_diff() {
+        let diff = sample_diff();
+        let a = file_signature(&diff.files[0]);
+        // Recomputing from the same file yields the same signature.
+        assert_eq!(a, file_signature(&diff.files[0]));
+        // A different file (different path/hunks) has a different signature.
+        let b = file_signature(&diff.files[1]);
+        assert_ne!(a, b);
+
+        // Changing a row's text changes the signature.
+        let mut diff2 = sample_diff();
+        if let DiffRow::Removed { text, .. } = &mut diff2.files[0].hunks[0].rows[1] {
+            *text = "changed".to_string();
+        } else {
+            panic!("expected a removed row");
+        }
+        assert_ne!(a, file_signature(&diff2.files[0]));
+
+        // Changing a hunk's line range changes the signature even if the
+        // rows stay the same.
+        let mut diff3 = sample_diff();
+        diff3.files[0].hunks[0].old_start += 1;
+        assert_ne!(a, file_signature(&diff3.files[0]));
+    }
+
+    #[test]
+    fn review_id_distinguishes_pr_and_local_sources() {
+        let pr = Source::Pr(gh::PrLocator {
+            owner: "acme".into(),
+            repo: "api".into(),
+            number: 42,
+        });
+        assert_eq!(review_id(&pr), "acme/api#42");
+
+        let base_src = git::LocalSource {
+            repo_root: "/tmp/myrepo".into(),
+            branch: "feature".into(),
+            base_ref: None,
+            base_label: "origin/main".into(),
+            base_oid: None,
+        };
+        let local = Source::Local(base_src.clone());
+        assert_eq!(review_id(&local), "/tmp/myrepo@origin/main");
+
+        // A different base for the same repo is a distinct review id.
+        let local2 = Source::Local(git::LocalSource {
+            base_label: "upstream/main".into(),
+            ..base_src
+        });
+        assert_ne!(review_id(&local), review_id(&local2));
     }
 
     #[test]
