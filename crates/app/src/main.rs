@@ -3501,6 +3501,39 @@ fn home_rows(
     rows
 }
 
+/// What pressing Enter on the repo-home step should do.
+#[derive(Debug, Clone, PartialEq)]
+enum HomeAction {
+    OpenPr { slug: String, number: u64 },
+    OpenRepo(String),
+    OpenFolder,
+    /// The query is a valid `owner/repo` not represented by any row — open it.
+    FetchRepo { owner: String, repo: String },
+    Nothing,
+}
+
+/// Decide the Enter action for the repo-home step. The **highlighted row wins**:
+/// a selected PR opens that PR, a selected repo opens its PR list, the folder
+/// row opens the picker. Only when nothing actionable is selected (the typed
+/// query matched no row) do we treat a valid `owner/repo` query as "open this
+/// new repo". This is what stops a leftover pre-filled slug (e.g. after Esc from
+/// a PR list) from hijacking Enter and re-opening the repo instead of the PR the
+/// user navigated to.
+fn home_confirm_action(rows: &[HomeRow], selected: usize, query: &str) -> HomeAction {
+    match rows.get(selected) {
+        Some(HomeRow::Pr { slug, number, .. }) => HomeAction::OpenPr {
+            slug: slug.clone(),
+            number: *number,
+        },
+        Some(HomeRow::Repo { slug, .. }) => HomeAction::OpenRepo(slug.clone()),
+        Some(HomeRow::Folder) => HomeAction::OpenFolder,
+        None => match parse_repo_slug(query) {
+            Ok((owner, repo)) => HomeAction::FetchRepo { owner, repo },
+            Err(_) => HomeAction::Nothing,
+        },
+    }
+}
+
 /// Display order for a repo's PRs: pinned PRs first, then the rest, both
 /// restricted to `filtered` (the fuzzy result) and preserving its order.
 /// Returns indices into `all`.
@@ -5093,12 +5126,14 @@ impl ReviewApp {
     fn palette_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.palette {
             None | Some(PaletteStep::RepoHome { .. }) => self.close_palette(window, cx),
-            Some(PaletteStep::PrList { repo, .. }) => {
-                let repo = repo.clone();
+            Some(PaletteStep::PrList { .. }) => {
+                // Return to a fresh home (empty input) so all recents/pins show
+                // again — not filtered to the repo we just came from. (A
+                // leftover slug here also used to make Enter re-open the repo.)
                 self.palette = Some(PaletteStep::RepoHome { selected: 0 });
                 self.palette_gen += 1;
                 self.set_palette_input(
-                    &repo,
+                    "",
                     "owner/repo to open its pull requests, or filter…",
                     window,
                     cx,
@@ -5232,10 +5267,6 @@ impl ReviewApp {
     /// otherwise act on the selected row (open a repo or the folder dialog).
     fn palette_home_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.palette_input.read(cx).value().trim().to_string();
-        if let Ok((owner, repo)) = parse_repo_slug(&query) {
-            self.palette_fetch_prs(owner, repo, window, cx);
-            return;
-        }
         let Some(PaletteStep::RepoHome { selected }) = &self.palette else {
             return;
         };
@@ -5246,16 +5277,20 @@ impl ReviewApp {
             &self.store.recent_repos,
             &query,
         );
-        match rows.into_iter().nth(selected) {
-            Some(HomeRow::Pr { slug, number, .. }) => {
+        // The highlighted row wins over a parseable query, so a leftover
+        // pre-filled slug (e.g. after Esc from a PR list) can't hijack Enter and
+        // re-open the repo instead of the PR the user navigated to.
+        match home_confirm_action(&rows, selected, &query) {
+            HomeAction::OpenPr { slug, number } => {
                 self.palette_open_recent_pr(&slug, number, window, cx)
             }
-            Some(HomeRow::Repo { slug, .. }) => self.palette_home_activate(&slug, window, cx),
-            Some(HomeRow::Folder) => {
+            HomeAction::OpenRepo(slug) => self.palette_home_activate(&slug, window, cx),
+            HomeAction::FetchRepo { owner, repo } => self.palette_fetch_prs(owner, repo, window, cx),
+            HomeAction::OpenFolder => {
                 self.close_palette(window, cx);
                 self.prompt_open_folder(cx);
             }
-            None => {}
+            HomeAction::Nothing => {}
         }
     }
 
@@ -9708,6 +9743,39 @@ index 0000000..1111111 100644
                 title: "New nav".into()
             }]
         );
+    }
+
+    #[test]
+    fn home_confirm_highlighted_row_wins_over_leftover_slug_query() {
+        // Regression: after Esc from a repo's PR list, the input is pre-filled
+        // with the repo slug. Enter on a highlighted PR must open THAT PR, not
+        // re-open the repo list.
+        let rows = vec![
+            HomeRow::Pr { slug: "a/api".into(), number: 188, title: "one".into() },
+            HomeRow::Pr { slug: "a/api".into(), number: 669, title: "two".into() },
+            HomeRow::Repo { slug: "a/api".into(), pinned: true },
+        ];
+        // selected = the second PR, query = the leftover valid slug
+        assert_eq!(
+            home_confirm_action(&rows, 1, "a/api"),
+            HomeAction::OpenPr { slug: "a/api".into(), number: 669 }
+        );
+        // highlighted repo row → open its PR list
+        assert_eq!(home_confirm_action(&rows, 2, "a/api"), HomeAction::OpenRepo("a/api".into()));
+    }
+
+    #[test]
+    fn home_confirm_typed_new_repo_with_no_matching_rows_fetches_it() {
+        // Typing a brand-new owner/repo not in recents: no rows match, so Enter
+        // opens that repo.
+        let rows = home_rows(&[], &[], &[], "acme/newrepo");
+        assert!(rows.is_empty());
+        assert_eq!(
+            home_confirm_action(&rows, 0, "acme/newrepo"),
+            HomeAction::FetchRepo { owner: "acme".into(), repo: "newrepo".into() }
+        );
+        // gibberish query, nothing selected → no-op
+        assert_eq!(home_confirm_action(&[], 0, "not a slug"), HomeAction::Nothing);
     }
 
     #[test]
