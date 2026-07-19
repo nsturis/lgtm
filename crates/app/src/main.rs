@@ -89,6 +89,59 @@ actions!(
     ]
 );
 
+/// First PATH directory holding a regular file named `name` (a cheap `which`).
+fn which_on_path(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths).find_map(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+/// A GUI launch (Finder / Dock / Spotlight) inherits launchd's minimal PATH —
+/// `/usr/bin:/bin:/usr/sbin:/sbin` — so Homebrew tools like `gh` and `git`
+/// aren't found even when `gh auth` is fully set up in the terminal. Recover
+/// the user's real PATH from their login shell (on macOS Homebrew's `shellenv`
+/// runs from `~/.zprofile`, a login file, so `-l` alone is enough — no flaky
+/// interactive shell needed). A terminal launch already has `gh` on PATH, so
+/// this no-ops there. Best-effort: any failure leaves PATH untouched.
+///
+/// Must run before any threads spawn (env mutation) and before the first
+/// `gh`/`git` subprocess — i.e. first thing in `main`.
+fn recover_login_shell_path() {
+    if which_on_path("gh").is_some() {
+        return;
+    }
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+    let Ok(output) = Command::new(&shell)
+        .args(["-lc", "printf %s \"$PATH\""])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let shell_path = String::from_utf8_lossy(&output.stdout);
+    let shell_path = shell_path.trim();
+    if shell_path.is_empty() {
+        return;
+    }
+    // Shell dirs first, then any current dir not already present, so we only
+    // ever add reachable locations and never drop one.
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(shell_path).collect();
+    if let Some(current) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&current) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(dirs) {
+        std::env::set_var("PATH", joined);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let [mode, root] = args.as_slice() {
@@ -100,6 +153,8 @@ fn main() {
             return;
         }
     }
+    // Make a Finder/Dock launch see the same `gh`/`git` the terminal does.
+    recover_login_shell_path();
     let mut sources = Vec::new();
     let mut errors = Vec::new();
     if args.is_empty() {
@@ -8421,6 +8476,13 @@ mod tests {
     // build_rows in patch-only mode (no upgrades), must produce Line rows that
     // actually carry syntax spans. If this passes but the app looks unhighlighted,
     // the binary is stale — rebuild.
+    #[test]
+    fn which_on_path_resolves_and_rejects() {
+        // `sh` is always on a test runner's PATH; a bogus name never is.
+        assert!(which_on_path("sh").is_some());
+        assert!(which_on_path("lgtm-no-such-binary-xyzzy").is_none());
+    }
+
     #[test]
     fn build_rows_emits_syntax_spans() {
         let patch = "\
