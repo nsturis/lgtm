@@ -336,6 +336,99 @@ static CSS: Language = Language::new(|| {
     .ok()
 });
 
+// `LANGUAGE_PHP_ONLY`, not `LANGUAGE_PHP`: the full grammar starts in HTML/text
+// mode and only highlights code inside `<?php … ?>`, so diff hunk fragments
+// (which rarely include the opening tag) render as plain text. `php_only` parses
+// its input as pure PHP, so bare fragments highlight. Its grammar still defines
+// `php_tag`/`php_end_tag`, so the bundled highlights query compiles unchanged.
+static PHP: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_php::LANGUAGE_PHP_ONLY.into(),
+        "php",
+        tree_sitter_php::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+static CSHARP: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_c_sharp::LANGUAGE.into(),
+        "c_sharp",
+        tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+static SWIFT: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_swift::LANGUAGE.into(),
+        "swift",
+        tree_sitter_swift::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+// tree-sitter-scss predates the LanguageFn convention: `language()` returns a
+// `Language` directly, so no `.into()` here.
+static SCSS: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_scss::language(),
+        "scss",
+        tree_sitter_scss::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+// Block-only markdown: headings, fenced code, lists, blockquotes. Inline spans
+// (emphasis, code, links) live in a separate INLINE_LANGUAGE we don't inject,
+// so they render as plain text — same tradeoff as our other injection skips.
+static MARKDOWN: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_md::LANGUAGE.into(),
+        "markdown",
+        tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        "",
+        "",
+    )
+    .ok()
+});
+
+static SQL: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_sequel::LANGUAGE.into(),
+        "sql",
+        tree_sitter_sequel::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+// Vue single-file components. Like tree-sitter-scss this grammar predates the
+// LanguageFn convention, so `language()` returns a `Language` directly (no
+// `.into()`). Highlights the template structure, tags, and Vue directives
+// (v-if, @click, :prop, …); the JS/TS inside `<script>` and CSS inside
+// `<style>` stay plain, since (as noted at the top of this file) we run no
+// injection callback — same tradeoff as HTML.
+static VUE: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_vue_updated::language(),
+        "vue",
+        tree_sitter_vue_updated::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
 /// Resolve a language from a path's extension. `None` means "render plain".
 pub fn language_for_path(path: &str) -> Option<&'static Language> {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -360,6 +453,13 @@ pub fn language_for_path(path: &str) -> Option<&'static Language> {
         "yml" | "yaml" => &YAML,
         "html" | "htm" => &HTML,
         "css" => &CSS,
+        "php" | "phtml" => &PHP,
+        "cs" => &CSHARP,
+        "swift" => &SWIFT,
+        "scss" | "sass" => &SCSS,
+        "md" | "markdown" => &MARKDOWN,
+        "sql" => &SQL,
+        "vue" => &VUE,
         _ => return None,
     };
     Some(lang)
@@ -460,6 +560,13 @@ mod tests {
             ("yaml", &YAML),
             ("html", &HTML),
             ("css", &CSS),
+            ("php", &PHP),
+            ("csharp", &CSHARP),
+            ("swift", &SWIFT),
+            ("scss", &SCSS),
+            ("markdown", &MARKDOWN),
+            ("sql", &SQL),
+            ("vue", &VUE),
         ];
         for (name, lang) in all {
             assert!(lang.config().is_some(), "{name} config failed to build");
@@ -473,6 +580,12 @@ mod tests {
         assert!(language_for_path("lib/foo/bar.ex").is_some());
         assert!(language_for_path("mix.EXS").is_some()); // case-insensitive
         assert!(language_for_path("index.d.ts").is_some());
+        assert!(language_for_path("src/App.php").is_some());
+        assert!(language_for_path("styles/main.scss").is_some());
+        assert!(language_for_path("README.md").is_some());
+        assert!(language_for_path("Program.cs").is_some());
+        assert!(language_for_path("query.SQL").is_some()); // case-insensitive
+        assert!(language_for_path("components/App.vue").is_some());
         assert!(language_for_path("Makefile").is_none());
         assert!(language_for_path("logo.png").is_none());
         assert!(language_for_path(".gitignore").is_none());
@@ -525,6 +638,29 @@ mod tests {
         assert!(lines[0].iter().any(|&(_, t)| t == Token::Namespace));
         // :ok is an atom → string.special.symbol → Constant.
         assert!(lines[1].iter().any(|&(_, t)| t == Token::Constant));
+    }
+
+    #[test]
+    fn php_highlights() {
+        let php = language_for_path("x.php").unwrap();
+        // A *bare* PHP fragment with no `<?php` tag — this is what diff hunks
+        // contain. The `php_only` grammar must highlight it (the HTML-aware
+        // `php` grammar would treat it all as inline text and emit nothing).
+        let lines = highlight_lines(php, "function greet($name) {\n  return \"hi\";\n}");
+        // `function` keyword on line 0, string literal on line 1.
+        assert!(lines[0].iter().any(|&(_, t)| t == Token::Keyword));
+        assert!(lines[1].iter().any(|&(_, t)| t == Token::String));
+    }
+
+    #[test]
+    fn vue_highlights_template() {
+        let vue = language_for_path("App.vue").unwrap();
+        let lines = highlight_lines(vue, "<template>\n  <div v-if=\"ok\">{{ msg }}</div>\n</template>");
+        // The grammar tags template structure/tag names as @tag (-> Function).
+        assert!(
+            lines.iter().flatten().any(|&(_, t)| t == Token::Function),
+            "expected Vue template tags to highlight"
+        );
     }
 
     #[test]

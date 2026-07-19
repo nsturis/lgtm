@@ -24,3 +24,14 @@ tree-sitter-css = "0.23"
 tree-sitter-elixir = "0.3"
 tree-sitter-gleam = { git = "https://github.com/gleam-lang/tree-sitter-gleam", rev = "c610c282ef73f830d80c1f0999dce8e83f024ef5" }
 tree-sitter-heex = "0.8"
+# Must match the version brokk-bifrost pulls (0.23.11): tree-sitter grammar
+# crates export un-namespaced C symbols (tree_sitter_php_only), so two versions
+# in the final binary collide and the linker binds ours to the wrong grammar —
+# breaking the highlight query. One shared version avoids the collision.
+tree-sitter-php = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-swift = "0.7"
+tree-sitter-scss = "1"
+tree-sitter-md = "0.5"
+tree-sitter-sequel = "0.3"
+tree-sitter-vue-updated = "0.1.0"
