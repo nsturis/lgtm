@@ -4789,6 +4789,11 @@ impl ReviewApp {
     fn palette_toggle_pin_repo(&mut self, slug: &str, cx: &mut Context<Self>) {
         self.store.toggle_pinned_repo(slug);
         self.save_store();
+        // Pinning re-sorts the home list (pinned first), so reset the highlight
+        // to the top rather than leaving it on whatever row shifted under it.
+        if let Some(PaletteStep::RepoHome { selected }) = &mut self.palette {
+            *selected = 0;
+        }
         cx.notify();
     }
 
