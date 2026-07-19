@@ -384,19 +384,25 @@ enum Row {
         author: SharedString,
         when: SharedString,
         is_reply: bool,
+        /// True for an unposted pending draft (see `PendingComment`):
+        /// rendered with a "draft" tag.
+        pending: bool,
     },
     /// One soft-wrapped line of a comment body (wrapped at
     /// [`COMMENT_WRAP_CHARS`] when the rows are built).
     CommentBody {
         line: SharedString,
     },
-    /// The "↳ reply" affordance closing a thread; clicking opens the
-    /// composer targeting `post_reply` on the thread's root comment.
+    /// Closes a thread with either the "↳ reply" affordance (clicking opens
+    /// the composer targeting `post_reply` on the thread's root comment), or
+    /// — when `pending` is Some(index into `ItemData::pending_review`) —
+    /// edit/delete affordances for that unposted draft.
     CommentActions {
         root_id: u64,
         path: SharedString,
         side: CommentSide,
         line: u64,
+        pending: Option<usize>,
     },
 }
 
@@ -510,17 +516,22 @@ impl CommentSide {
 
 /// One review thread: the top-level comment plus its replies, in
 /// created_at order.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CommentThread {
     root: gh::ReviewComment,
     replies: Vec<gh::ReviewComment>,
+    /// Some(index into `ItemData::pending_review`) when this is an in-memory
+    /// PR draft not yet posted (see `merge_pending_comments`); None for
+    /// posted/local-review threads. Lets the actions row offer edit/delete
+    /// instead of reply.
+    pending: Option<usize>,
 }
 
 /// One file's threads, keyed by anchor.
 type FileAnchors = HashMap<(CommentSide, u64), Vec<CommentThread>>;
 
 /// Review comments grouped for row building.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct CommentIndex {
     /// path → (side, line) → threads in root-created order.
     threads: HashMap<String, FileAnchors>,
@@ -546,6 +557,7 @@ fn group_comments(mut comments: Vec<gh::ReviewComment>) -> CommentIndex {
                 threads.push(CommentThread {
                     root: comment,
                     replies: Vec::new(),
+                    pending: None,
                 });
             }
             Some(parent) => {
@@ -616,6 +628,75 @@ impl LocalReview {
             in_reply_to_id: reply_to,
         });
     }
+}
+
+/// A queued PR review comment: typed in the composer's default ("Add to
+/// review") action, held in memory until the review is submitted, when it
+/// posts together with the verdict in one `gh` create-review call. PR-only —
+/// local reviews use `LocalReview` instead.
+#[derive(Debug, Clone)]
+struct PendingComment {
+    path: String,
+    side: CommentSide,
+    line: u64,
+    commit_id: String,
+    body: String,
+}
+
+/// Queue a new pending draft.
+fn queue_pending(pending: &mut Vec<PendingComment>, draft: PendingComment) {
+    pending.push(draft);
+}
+
+/// Remove and return the draft at `ix` so its composer can reopen prefilled;
+/// resubmitting adds a fresh entry rather than editing this one in place.
+/// `None` when `ix` is out of range (the row went stale, e.g. a concurrent
+/// delete).
+fn take_pending_for_edit(pending: &mut Vec<PendingComment>, ix: usize) -> Option<PendingComment> {
+    (ix < pending.len()).then(|| pending.remove(ix))
+}
+
+/// Drop the draft at `ix`. No-op when out of range.
+fn remove_pending(pending: &mut Vec<PendingComment>, ix: usize) {
+    if ix < pending.len() {
+        pending.remove(ix);
+    }
+}
+
+/// Merge in-memory pending PR review drafts into `index` as standalone
+/// one-comment threads, so they render — with a distinct draft style and
+/// edit/delete affordances — through the same comment-row machinery as
+/// posted comments. Each synthetic thread's `pending` field carries the
+/// draft's index into `pending`, letting the actions row find it again.
+fn merge_pending_comments(mut index: CommentIndex, pending: &[PendingComment]) -> CommentIndex {
+    for (ix, draft) in pending.iter().enumerate() {
+        let counts = index.counts.entry(draft.path.clone()).or_default();
+        counts.0 += 1;
+        index
+            .threads
+            .entry(draft.path.clone())
+            .or_default()
+            .entry((draft.side, draft.line))
+            .or_default()
+            .push(CommentThread {
+                root: gh::ReviewComment {
+                    id: 0,
+                    path: draft.path.clone(),
+                    line: Some(draft.line),
+                    side: Some(draft.side.api_str().to_string()),
+                    start_line: None,
+                    body: draft.body.clone(),
+                    user: gh::Author {
+                        login: "you".to_string(),
+                    },
+                    created_at: "now".to_string(),
+                    in_reply_to_id: None,
+                },
+                replies: Vec::new(),
+                pending: Some(ix),
+            });
+    }
+    index
 }
 
 /// Comment bodies soft-wrap at this many chars (the pane is monospace).
@@ -878,6 +959,7 @@ fn push_thread_rows(
                 author: comment.user.login.clone().into(),
                 when: short_age(&comment.created_at, now).into(),
                 is_reply: ix > 0,
+                pending: thread.pending.is_some(),
             });
             for line in wrap_body(&comment.body, COMMENT_WRAP_CHARS) {
                 rows.push(Row::CommentBody { line: line.into() });
@@ -888,6 +970,7 @@ fn push_thread_rows(
             path: path.to_string().into(),
             side,
             line: no as u64,
+            pending: thread.pending,
         });
     }
 }
@@ -1784,6 +1867,7 @@ fn render_row(
             author,
             when,
             is_reply,
+            pending,
         } => {
             let mut inner = div().flex().items_center().gap_2().min_w_0();
             if *is_reply {
@@ -1793,22 +1877,28 @@ fn render_row(
                         .child(SharedString::from("↳")),
                 );
             }
-            comment_row(
-                inner
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme::text())
-                            .child(author.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme::overlay0())
-                            .text_size(px(11.))
-                            .child(when.clone()),
-                    )
-                    .into_any_element(),
-            )
+            inner = inner
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme::text())
+                        .child(author.clone()),
+                )
+                .child(
+                    div()
+                        .text_color(theme::overlay0())
+                        .text_size(px(11.))
+                        .child(when.clone()),
+                );
+            if *pending {
+                let peach: Hsla = theme::peach().into();
+                inner = inner.child(
+                    Tag::custom(peach.opacity(0.15), peach, peach.opacity(0.4))
+                        .small()
+                        .child(SharedString::from("draft")),
+                );
+            }
+            comment_row(inner.into_any_element())
         }
         Row::CommentBody { line } => comment_row(
             div()
@@ -1822,32 +1912,72 @@ fn render_row(
             path,
             side,
             line,
+            pending,
         } => {
-            let (root_id, side, line) = (*root_id, *side, *line);
+            let (root_id, side, line, pending) = (*root_id, *side, *line, *pending);
             let path = path.clone();
             let entity = entity.clone();
-            comment_row(
-                div()
-                    .id(("reply", root_id as usize))
-                    .cursor_pointer()
-                    .text_color(theme::blue())
-                    .hover(|style| style.opacity(0.8))
-                    .child(SharedString::from("↳ reply"))
-                    .on_click(move |_, window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.open_composer(
-                                Some(root_id),
-                                path.to_string(),
-                                side,
-                                line,
-                                ix,
-                                window,
-                                cx,
-                            );
-                        });
-                    })
-                    .into_any_element(),
-            )
+            match pending {
+                Some(pending_ix) => {
+                    let edit_entity = entity.clone();
+                    comment_row(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id(("edit-pending", pending_ix))
+                                    .cursor_pointer()
+                                    .text_color(theme::blue())
+                                    .hover(|style| style.opacity(0.8))
+                                    .child(SharedString::from("edit"))
+                                    .on_click(move |_, window, cx| {
+                                        edit_entity.update(cx, |this, cx| {
+                                            this.edit_pending(pending_ix, ix, window, cx);
+                                        });
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(("delete-pending", pending_ix))
+                                    .cursor_pointer()
+                                    .text_color(theme::red())
+                                    .hover(|style| style.opacity(0.8))
+                                    .child(SharedString::from("delete"))
+                                    .on_click(move |_, _, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.delete_pending(pending_ix, cx);
+                                        });
+                                    }),
+                            )
+                            .into_any_element(),
+                    )
+                }
+                None => comment_row(
+                    div()
+                        .id(("reply", root_id as usize))
+                        .cursor_pointer()
+                        .text_color(theme::blue())
+                        .hover(|style| style.opacity(0.8))
+                        .child(SharedString::from("↳ reply"))
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.open_composer(
+                                    Some(root_id),
+                                    path.to_string(),
+                                    side,
+                                    line,
+                                    ix,
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        })
+                        .into_any_element(),
+                ),
+            }
         }
         Row::Spacer => div().h(row_height).into_any_element(),
         Row::Gap {
@@ -2774,9 +2904,16 @@ struct ItemData {
     /// themselves replace `diff.files[ix].hunks`. Reset on refresh.
     upgrades: HashMap<usize, FileUpgrade>,
     /// Review threads grouped by anchor; Some for PR items (possibly empty),
-    /// and for local items with in-memory draft comments.
+    /// and for local items with in-memory draft comments. Fetched/local only
+    /// — see `comments_for_rows` for the version row-building actually uses,
+    /// which also merges in `pending_review`.
     comments: Option<CommentIndex>,
     local_review: Option<LocalReview>,
+    /// Queued PR review comments (the composer's default "Add to review"
+    /// action), posted together with the verdict in one `gh` create-review
+    /// call on submit. PR-only; in-memory for the session, like
+    /// `local_review`.
+    pending_review: Vec<PendingComment>,
     /// `c` toggles the comment rows; the file-header counts always show.
     comments_visible: bool,
     /// Users offered by the composer's `@`-mention autocomplete. Shared live
@@ -2878,10 +3015,27 @@ impl ItemData {
             .set_offset(point(offset.x, px(-(new_top as f32 * ROW_HEIGHT + frac))));
     }
 
+    /// The CommentIndex row-building uses: `comments` (fetched/local) plus
+    /// any of this item's `pending_review` drafts not yet posted, merged in
+    /// as standalone threads so they render — with edit/delete affordances —
+    /// through the same comment-row machinery as posted comments. Returns
+    /// `comments` unchanged (no clone) when there's nothing pending — every
+    /// non-PR item, and any PR item before its first queued comment.
+    fn comments_for_rows(&self) -> Option<CommentIndex> {
+        if self.pending_review.is_empty() {
+            return self.comments.clone();
+        }
+        Some(merge_pending_comments(
+            self.comments.clone().unwrap_or_default(),
+            &self.pending_review,
+        ))
+    }
+
     /// Rebuild the display rows after only the comment rows changed
-    /// (visibility toggle, comment refetch), keeping the viewport anchored:
-    /// the first visible non-comment row stays put even though comment rows
-    /// above it appeared or disappeared.
+    /// (visibility toggle, comment refetch, pending draft added/edited/
+    /// deleted), keeping the viewport anchored: the first visible
+    /// non-comment row stays put even though comment rows above it appeared
+    /// or disappeared.
     fn rebuild_rows_anchored(&mut self) {
         let offset = self.scroll.0.borrow().base_handle.offset();
         let top_px = f32::from(-offset.y).max(0.);
@@ -2892,11 +3046,12 @@ impl ItemData {
             |rows: &[Row]| rows.iter().filter(|row| !is_comment_row(row)).count();
         let top_base = count_noncomment(&self.rows[..top_row]);
         let cursor_base = count_noncomment(&self.rows[..self.cursor.min(self.rows.len())]);
+        let comments = self.comments_for_rows();
         let built = build_rows_cached(
             &self.diff,
             self.mode,
             &self.upgrades,
-            self.comments.as_ref(),
+            comments.as_ref(),
             self.comments_visible,
             &mut self.hunk_syntax_cache,
             &self.viewed,
@@ -2931,11 +3086,12 @@ impl ItemData {
         let (top_file, top_offset) = locate_in_file(&self.file_rows, top_row);
         let cursor_row = self.cursor.min(self.rows.len().saturating_sub(1));
         let (cursor_file, cursor_offset) = locate_in_file(&self.file_rows, cursor_row);
+        let comments = self.comments_for_rows();
         let built = build_rows_cached(
             &self.diff,
             self.mode,
             &self.upgrades,
-            self.comments.as_ref(),
+            comments.as_ref(),
             self.comments_visible,
             &mut self.hunk_syntax_cache,
             &self.viewed,
@@ -3098,19 +3254,22 @@ impl ReviewItem {
                 data.review_id = review_id(&self.source);
                 data.resolve_viewed(store);
                 if data.local_review.is_some()
+                    || !data.pending_review.is_empty()
                     || data.mode != mode
                     || !data.comments_visible
                     || !data.viewed.is_empty()
                 {
                     // Background rows assumed the fetched comments and no
-                    // viewed files. Local drafts are reattached here, view/
-                    // comment toggles may have changed while the refresh
-                    // ran, and any viewed files need to render collapsed.
+                    // viewed files. Local drafts and pending PR drafts are
+                    // reattached here, view/comment toggles may have changed
+                    // while the refresh ran, and any viewed files need to
+                    // render collapsed.
+                    let comments = data.comments_for_rows();
                     (rows, file_rows, hunk_rows) = build_rows_cached(
                         &data.diff,
                         data.mode,
                         &data.upgrades,
-                        data.comments.as_ref(),
+                        comments.as_ref(),
                         data.comments_visible,
                         &mut data.hunk_syntax_cache,
                         &data.viewed,
@@ -3159,6 +3318,7 @@ impl ReviewItem {
                     upgrades: HashMap::new(),
                     comments,
                     local_review,
+                    pending_review: Vec::new(),
                     comments_visible: true,
                     mentions: Rc::new(RefCell::new(Vec::new())),
                     mentions_fetched: false,
@@ -4287,6 +4447,7 @@ fn local_review_threads(review: &LocalReview) -> Vec<CommentThread> {
                 threads.push(CommentThread {
                     root: comment,
                     replies: Vec::new(),
+                    pending: None,
                 });
             }
             Some(parent) => {
@@ -5161,11 +5322,12 @@ impl ReviewApp {
                 // branch in `build_rows`), so any of their stale entries are
                 // simply unused, not incorrect — every other file's cached
                 // spans are still valid and get reused here.
+                let comments = data.comments_for_rows();
                 let built = build_rows_cached(
                     &data.diff,
                     data.mode,
                     &data.upgrades,
-                    data.comments.as_ref(),
+                    comments.as_ref(),
                     data.comments_visible,
                     &mut data.hunk_syntax_cache,
                     &data.viewed,
@@ -5318,11 +5480,12 @@ impl ReviewApp {
             matches!(row, Row::Gap { file_ix: f, gap_ix: g, .. } if *f == file_ix && *g == gap_ix)
         });
         let old_len = data.rows.len();
+        let comments = data.comments_for_rows();
         let built = build_rows_cached(
             &data.diff,
             data.mode,
             &data.upgrades,
-            data.comments.as_ref(),
+            comments.as_ref(),
             data.comments_visible,
             &mut data.hunk_syntax_cache,
             &data.viewed,
@@ -5974,11 +6137,12 @@ impl ReviewApp {
             ViewMode::Unified => ViewMode::Split,
             ViewMode::Split => ViewMode::Unified,
         };
+        let comments = data.comments_for_rows();
         let built = build_rows_cached(
             &data.diff,
             data.mode,
             &data.upgrades,
-            data.comments.as_ref(),
+            comments.as_ref(),
             data.comments_visible,
             &mut data.hunk_syntax_cache,
             &data.viewed,
@@ -6512,6 +6676,8 @@ impl ReviewApp {
 
     // Known god-module smell (many params), tracked under the ARCH refactor.
     #[allow(clippy::too_many_arguments)]
+    // Known god-module smell (many params), tracked under the ARCH refactor.
+    #[allow(clippy::too_many_arguments)]
     fn open_composer(
         &mut self,
         reply_to: Option<u64>,
@@ -6519,6 +6685,9 @@ impl ReviewApp {
         side: CommentSide,
         line: u64,
         row_ix: usize,
+        // Prefills the composer's input — used to reopen it on a pending
+        // draft's body when the user clicks "edit" (see `edit_pending`).
+        prefill: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -6549,14 +6718,21 @@ impl ReviewApp {
         });
         // cmd-enter: the input's own `secondary-enter` binding emits
         // PressEnter { secondary: true } (after inserting a newline, which
-        // submit trims away).
+        // submit trims away). It maps to "Add to review" (queue a pending
+        // draft) for a new top-level PR comment — the safe, no-network
+        // default — not "Comment now", which is button-only: binding plain
+        // Enter to a submit action isn't viable here since multi-line inputs
+        // (`auto_grow`) insert a newline on every Enter, secondary or not.
         let _subscription =
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { secondary: true }) {
-                    this.submit_composer(window, cx);
+                    this.submit_composer(false, window, cx);
                 }
             });
         input.update(cx, |state, cx| state.focus(window, cx));
+        if let Some(prefill) = prefill {
+            input.update(cx, |state, cx| state.set_value(prefill, window, cx));
+        }
         // Wire up @-mention autocomplete for PR items: seed the pool with known
         // participants now, attach the provider, then fetch the full list once.
         if let Some(loc) = pr_loc {
@@ -6639,9 +6815,14 @@ impl ReviewApp {
         }
     }
 
-    /// Submit the composer's comment (or reply): local items update in-memory
-    /// drafts immediately; PR items post via gh on the background executor.
-    fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Submit the composer's comment (or reply). Local items update in-memory
+    /// drafts immediately, unchanged. PR items: a reply always posts
+    /// immediately (`post_reply`); a new top-level comment queues as a
+    /// pending draft (no network) unless `immediate` is set, in which case it
+    /// posts right away via `post_review_comment` — the "Comment now" escape
+    /// hatch for one-offs. Pending drafts post together with the verdict when
+    /// the review is submitted (see `submit_review`).
+    fn submit_composer(&mut self, immediate: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(composer) = &self.composer else {
             return;
         };
@@ -6680,6 +6861,13 @@ impl ReviewApp {
         let Source::Pr(loc) = source else {
             return;
         };
+        if reply_to.is_none() && !immediate {
+            self.add_pending_comment(item_id, path, side, line, commit_id, body, cx);
+            if self.composer_gen == gen {
+                self.close_composer(window, cx);
+            }
+            return;
+        }
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let post_loc = loc.clone();
@@ -6744,6 +6932,82 @@ impl ReviewApp {
         };
         local.add_comment(reply_to, path, side, line, body);
         data.comments = Some(local.index());
+        data.rebuild_rows_anchored();
+        cx.notify();
+    }
+
+    /// Queue a new top-level PR comment as a pending draft: no network call,
+    /// just an in-memory `PendingComment` that renders in the diff (via
+    /// `ItemData::comments_for_rows`) until the review is submitted.
+    // Known god-module smell (many params), tracked under the ARCH refactor.
+    #[allow(clippy::too_many_arguments)]
+    fn add_pending_comment(
+        &mut self,
+        item_id: u64,
+        path: String,
+        side: CommentSide,
+        line: u64,
+        commit_id: String,
+        body: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) else {
+            return;
+        };
+        let ItemState::Ready(data) = &mut item.state else {
+            return;
+        };
+        queue_pending(
+            &mut data.pending_review,
+            PendingComment {
+                path,
+                side,
+                line,
+                commit_id,
+                body,
+            },
+        );
+        data.rebuild_rows_anchored();
+        cx.notify();
+    }
+
+    /// Reopen the composer prefilled with a pending draft's body, removing
+    /// the draft so resubmitting adds a fresh entry rather than duplicating
+    /// it. `row_ix` is the clicked "edit" row, passed through as the
+    /// composer's best-effort anchor (see `open_composer`).
+    fn edit_pending(
+        &mut self,
+        pending_ix: usize,
+        row_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(data) = self.active_data_mut() else {
+            return;
+        };
+        let Some(draft) = take_pending_for_edit(&mut data.pending_review, pending_ix) else {
+            return;
+        };
+        data.rebuild_rows_anchored();
+        cx.notify();
+        self.open_composer(
+            None,
+            draft.path,
+            draft.side,
+            draft.line,
+            row_ix,
+            Some(draft.body),
+            window,
+            cx,
+        );
+    }
+
+    /// Drop a pending draft without posting it.
+    fn delete_pending(&mut self, pending_ix: usize, cx: &mut Context<Self>) {
+        let Some(data) = self.active_data_mut() else {
+            return;
+        };
+        remove_pending(&mut data.pending_review, pending_ix);
         data.rebuild_rows_anchored();
         cx.notify();
     }
@@ -7533,7 +7797,7 @@ impl ReviewApp {
                     cx.stop_propagation();
                     let path = path.clone();
                     entity.update(cx, |this, cx| {
-                        this.open_composer(None, path, anchor_side, line, row_ix, window, cx);
+                        this.open_composer(None, path, anchor_side, line, row_ix, None, window, cx);
                     });
                 })
                 .into_any_element(),
@@ -7549,9 +7813,15 @@ impl ReviewApp {
             return empty();
         };
         // Only render for the item it was opened on, and only while active.
-        if self.items.get(self.active).map(|item| item.id) != Some(composer.item_id) {
+        let Some(item) = self.items.get(self.active) else {
+            return empty();
+        };
+        if item.id != composer.item_id {
             return empty();
         }
+        // A new (non-reply) top-level comment on a PR gets the two-button
+        // batched/immediate choice; replies and local items keep one button.
+        let batchable = matches!(item.source, Source::Pr(_)) && composer.reply_to.is_none();
         let Some(data) = self.active_data() else {
             return empty();
         };
@@ -7567,6 +7837,11 @@ impl ReviewApp {
             "Reply"
         } else {
             "Comment"
+        };
+        let hint = if batchable {
+            "⌘⏎ to add to review"
+        } else {
+            "⌘⏎ to submit"
         };
         let target = format!(
             "{}{}:{} ({})",
@@ -7611,8 +7886,8 @@ impl ReviewApp {
             .when_some(composer.error.clone(), |card, err| {
                 card.child(div().text_color(theme::red()).child(err))
             })
-            .child(
-                div()
+            .child({
+                let mut row = div()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -7621,7 +7896,7 @@ impl ReviewApp {
                             .flex_1()
                             .text_size(px(11.))
                             .text_color(theme::overlay0())
-                            .child(SharedString::from("⌘⏎ to submit")),
+                            .child(SharedString::from(hint)),
                     )
                     .child(
                         Button::new("composer-cancel")
@@ -7631,19 +7906,31 @@ impl ReviewApp {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.close_composer(window, cx);
                             })),
-                    )
-                    .child(
-                        Button::new("composer-submit")
-                            .label(action)
-                            .primary()
+                    );
+                if batchable {
+                    row = row.child(
+                        Button::new("composer-comment-now")
+                            .label("Comment now")
+                            .ghost()
                             .small()
                             .disabled(composer.in_flight)
-                            .loading(composer.in_flight)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.submit_composer(window, cx);
+                                this.submit_composer(true, window, cx);
                             })),
-                    ),
-            )
+                    );
+                }
+                row.child(
+                    Button::new("composer-submit")
+                        .label(if batchable { "Add to review" } else { action })
+                        .primary()
+                        .small()
+                        .disabled(composer.in_flight)
+                        .loading(composer.in_flight)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.submit_composer(!batchable, window, cx);
+                        })),
+                )
+            })
             .into_any_element()
     }
 
@@ -11342,6 +11629,7 @@ index 0000000..1111111 100644
                 path,
                 side,
                 line,
+                ..
             } => {
                 assert_eq!(*root_id, 1);
                 assert_eq!(path.as_ref(), "a.rs");
@@ -11661,6 +11949,100 @@ index 0000000..1111111 100644
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].root.body, "please simplify this");
         assert_eq!(threads[0].replies[0].body, "also add a test");
+    }
+
+    fn draft(path: &str, side: CommentSide, line: u64, body: &str) -> PendingComment {
+        PendingComment {
+            path: path.to_string(),
+            side,
+            line,
+            commit_id: "deadbeef".to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn queue_pending_appends() {
+        let mut pending = Vec::new();
+        queue_pending(&mut pending, draft("a.rs", CommentSide::Right, 1, "one"));
+        queue_pending(&mut pending, draft("b.rs", CommentSide::Left, 2, "two"));
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].body, "one");
+        assert_eq!(pending[1].path, "b.rs");
+    }
+
+    #[test]
+    fn take_pending_for_edit_removes_and_returns() {
+        let mut pending = vec![
+            draft("a.rs", CommentSide::Right, 1, "one"),
+            draft("b.rs", CommentSide::Left, 2, "two"),
+        ];
+        let taken = take_pending_for_edit(&mut pending, 0).unwrap();
+        assert_eq!(taken.body, "one");
+        // The remaining draft shifted down to index 0.
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].body, "two");
+        // Out of range: no-op, returns None.
+        assert!(take_pending_for_edit(&mut pending, 5).is_none());
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn remove_pending_drops_by_index() {
+        let mut pending = vec![
+            draft("a.rs", CommentSide::Right, 1, "one"),
+            draft("b.rs", CommentSide::Left, 2, "two"),
+        ];
+        remove_pending(&mut pending, 0);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].body, "two");
+        // Out of range: no-op, doesn't panic.
+        remove_pending(&mut pending, 5);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn merge_pending_comments_adds_standalone_threads_and_counts() {
+        let index = CommentIndex::default();
+        let pending = vec![
+            draft("a.rs", CommentSide::Right, 2, "queued note"),
+            draft("a.rs", CommentSide::Left, 5, "another"),
+        ];
+        let merged = merge_pending_comments(index, &pending);
+        assert_eq!(merged.counts["a.rs"], (2, 0));
+        let right = &merged.threads["a.rs"][&(CommentSide::Right, 2)];
+        assert_eq!(right.len(), 1);
+        assert_eq!(right[0].root.body, "queued note");
+        assert_eq!(right[0].root.user.login, "you");
+        assert_eq!(right[0].pending, Some(0));
+        assert!(right[0].replies.is_empty());
+        let left = &merged.threads["a.rs"][&(CommentSide::Left, 5)];
+        assert_eq!(left[0].pending, Some(1));
+    }
+
+    #[test]
+    fn merge_pending_comments_appends_alongside_posted_threads() {
+        let index = group_comments(vec![rc(
+            1,
+            "a.rs",
+            Some("RIGHT"),
+            Some(2),
+            "posted",
+            "alice",
+            "2026-01-01T00:00:00Z",
+            None,
+        )]);
+        assert_eq!(index.counts["a.rs"], (1, 0));
+        let merged =
+            merge_pending_comments(index, &[draft("a.rs", CommentSide::Right, 2, "queued")]);
+        // Posted comment count plus the pending draft.
+        assert_eq!(merged.counts["a.rs"], (2, 0));
+        let threads = &merged.threads["a.rs"][&(CommentSide::Right, 2)];
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].pending, None);
+        assert_eq!(threads[0].root.body, "posted");
+        assert_eq!(threads[1].pending, Some(0));
+        assert_eq!(threads[1].root.body, "queued");
     }
 
     #[test]
