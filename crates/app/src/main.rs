@@ -3123,6 +3123,7 @@ fn palette_pr_row(
     pr: &gh::PrSummary,
     pos: usize,
     selected: bool,
+    pinned: bool,
     entity: gpui::Entity<ReviewApp>,
 ) -> gpui::AnyElement {
     let dot = if pr.is_draft {
@@ -3144,8 +3145,11 @@ fn palette_pr_row(
         .when(!selected, |row| {
             row.hover(|style| style.bg(Hsla::from(theme::surface0()).opacity(0.5)))
         })
-        .on_click(move |_, window, cx| {
-            entity.update(cx, |this, cx| this.palette_open_pr_row(pos, window, cx));
+        .on_click({
+            let entity = entity.clone();
+            move |_, window, cx| {
+                entity.update(cx, |this, cx| this.palette_open_pr_row(pos, window, cx));
+            }
         })
         .child(
             div()
@@ -3155,6 +3159,21 @@ fn palette_pr_row(
                 .rounded_full()
                 .bg(dot),
         )
+        .child({
+            let entity = entity.clone();
+            let number = pr.number;
+            div()
+                .id(("palette-pr-star", pos))
+                .flex_shrink_0()
+                .px_1()
+                .cursor_pointer()
+                .text_color(if pinned { theme::peach() } else { theme::overlay0() })
+                .child(SharedString::from(if pinned { "\u{2605}" } else { "\u{2606}" }))
+                .on_click(move |_, _window, cx| {
+                    cx.stop_propagation();
+                    entity.update(cx, |this, cx| this.palette_toggle_pin_pr(number, cx));
+                })
+        })
         .child(
             div()
                 .flex_shrink_0()
@@ -4640,6 +4659,11 @@ impl ReviewApp {
 
     fn palette_query_changed(&mut self, cx: &mut Context<Self>) {
         let query = self.palette_input.read(cx).value().to_string();
+        let pinned = self
+            .active_repo
+            .as_ref()
+            .map(|r| self.store.pinned_prs_for(r).to_vec())
+            .unwrap_or_default();
         match &mut self.palette {
             Some(PaletteStep::RepoHome { selected }) => {
                 let len = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query).len();
@@ -4659,7 +4683,7 @@ impl ReviewApp {
                     },
                 ..
             }) => {
-                *filtered = filter_prs(all, &query);
+                *filtered = order_prs(all, &filter_prs(all, &query), &pinned);
                 *selected = 0;
                 self.palette_scroll.scroll_to_item(0, ScrollStrategy::Top);
             }
@@ -4750,6 +4774,26 @@ impl ReviewApp {
         cx.notify();
     }
 
+    /// Toggle the pin on PR `number` in the active repo, persist, and re-order.
+    fn palette_toggle_pin_pr(&mut self, number: u64, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repo.clone() else {
+            return;
+        };
+        self.store.toggle_pinned_pr(&repo, number);
+        self.save_store();
+        let query = self.palette_input.read(cx).value().to_string();
+        let pinned = self.store.pinned_prs_for(&repo).to_vec();
+        if let Some(PaletteStep::PrList {
+            prs: PrListState::Loaded { all, filtered, selected },
+            ..
+        }) = &mut self.palette
+        {
+            *filtered = order_prs(all, &filter_prs(all, &query), &pinned);
+            *selected = 0;
+        }
+        cx.notify();
+    }
+
     fn palette_activate_source(&mut self, opt: usize, window: &mut Window, cx: &mut Context<Self>) {
         match opt {
             SOURCE_PR => {
@@ -4778,6 +4822,7 @@ impl ReviewApp {
         cx: &mut Context<Self>,
     ) {
         let slug = format!("{owner}/{repo}");
+        let pinned = self.store.pinned_prs_for(&slug).to_vec();
         self.palette_gen += 1;
         let gen = self.palette_gen;
         self.palette = Some(PaletteStep::PrList {
@@ -4803,7 +4848,7 @@ impl ReviewApp {
                 };
                 *prs = match fetched {
                     Ok(all) => {
-                        let filtered = filter_prs(&all, &query);
+                        let filtered = order_prs(&all, &filter_prs(&all, &query), &pinned);
                         PrListState::Loaded {
                             all,
                             filtered,
@@ -7426,10 +7471,16 @@ impl ReviewApp {
                                 else {
                                     return Vec::new();
                                 };
+                                let pinned: &[u64] = this
+                                    .active_repo
+                                    .as_deref()
+                                    .map(|r| this.store.pinned_prs_for(r))
+                                    .unwrap_or(&[]);
                                 range
                                     .filter_map(|pos| Some((pos, &all[*filtered.get(pos)?])))
                                     .map(|(pos, pr)| {
-                                        palette_pr_row(pr, pos, pos == *selected, entity.clone())
+                                        let is_pinned = pinned.contains(&pr.number);
+                                        palette_pr_row(pr, pos, pos == *selected, is_pinned, entity.clone())
                                     })
                                     .collect()
                             })
