@@ -329,6 +329,7 @@ struct Cell {
     syntax: Vec<(Range<usize>, syntax::Token)>,
 }
 
+#[derive(Clone)]
 enum Row {
     Spacer,
     FileHeader {
@@ -428,6 +429,24 @@ fn nth_noncomment_row(rows: &[Row], n: usize) -> usize {
     let mut seen = 0;
     for (ix, row) in rows.iter().enumerate() {
         if !is_comment_row(row) {
+            if seen == n {
+                return ix;
+            }
+            seen += 1;
+        }
+    }
+    rows.len().saturating_sub(1)
+}
+
+/// The display-row index of the `n`th logical-line start (a non-continuation
+/// row, see [`is_continuation_row`]), 0-indexed. Mirrors
+/// [`nth_noncomment_row`], used to re-anchor the viewport on a wrap-width
+/// change: a logical line's rank among row-starts is invariant across
+/// rewrapping even though its own display-row count may change.
+fn nth_row_start(rows: &[Row], n: usize) -> usize {
+    let mut seen = 0;
+    for (ix, row) in rows.iter().enumerate() {
+        if !is_continuation_row(row) {
             if seen == n {
                 return ix;
             }
@@ -1166,6 +1185,39 @@ fn build_rows(
     comments: Option<&CommentIndex>,
     show_comments: bool,
 ) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
+    build_rows_impl(diff, mode, upgrades, comments, show_comments, None)
+}
+
+/// Per-(file, hunk) memo of `hunk_syntax`'s output, so rebuilding the rows
+/// (comment toggle, gap expand, view toggle, upgrade install) doesn't
+/// re-run tree-sitter over hunks whose highlighting was already computed.
+/// Only consulted for non-upgraded hunks (upgraded ones already skip
+/// `hunk_syntax` via `FileUpgrade::row_spans`). Cleared whenever the diff
+/// itself is replaced (refresh) since `(file_ix, hunk_ix)` keys would
+/// otherwise silently return stale spans for different content.
+type HunkSyntaxCache = HashMap<(usize, usize), Vec<Vec<(Range<usize>, syntax::Token)>>>;
+
+/// Same as `build_rows`, but reusing/populating `cache` for non-upgraded
+/// hunks' syntax spans instead of recomputing them every time.
+fn build_rows_cached(
+    diff: &PrDiff,
+    mode: ViewMode,
+    upgrades: &HashMap<usize, FileUpgrade>,
+    comments: Option<&CommentIndex>,
+    show_comments: bool,
+    cache: &mut HunkSyntaxCache,
+) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
+    build_rows_impl(diff, mode, upgrades, comments, show_comments, Some(cache))
+}
+
+fn build_rows_impl(
+    diff: &PrDiff,
+    mode: ViewMode,
+    upgrades: &HashMap<usize, FileUpgrade>,
+    comments: Option<&CommentIndex>,
+    show_comments: bool,
+    mut cache: Option<&mut HunkSyntaxCache>,
+) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
     let mut rows = Vec::new();
     let mut file_rows = Vec::new();
     let mut hunk_rows = Vec::new();
@@ -1220,7 +1272,13 @@ fn build_rows(
             }
             let syntax_spans = match upgrade {
                 Some(upgrade) => hunk.rows.iter().map(|row| upgrade.row_spans(row)).collect(),
-                None => hunk_syntax(lang, &hunk.rows),
+                None => match cache.as_mut() {
+                    Some(cache) => cache
+                        .entry((file_ix, hunk_ix))
+                        .or_insert_with(|| hunk_syntax(lang, &hunk.rows))
+                        .clone(),
+                    None => hunk_syntax(lang, &hunk.rows),
+                },
             };
             hunk_rows.push(rows.len());
             let mut label = format!(
@@ -2479,6 +2537,15 @@ struct ItemData {
     rows: Vec<Row>,
     file_rows: Vec<usize>,
     hunk_rows: Vec<usize>,
+    /// Unwrapped rows as last produced by `build_rows`, cached so a
+    /// wrap-width change can re-wrap (`rewrap`) without re-running
+    /// `build_rows` (and its tree-sitter highlighting) at all.
+    base_rows: Vec<Row>,
+    base_file_rows: Vec<usize>,
+    base_hunk_rows: Vec<usize>,
+    /// Memoized `hunk_syntax` output for non-upgraded hunks, keyed by
+    /// `(file_ix, hunk_ix)`; see [`HunkSyntaxCache`]. Cleared on refresh.
+    hunk_syntax_cache: HunkSyntaxCache,
     /// Soft-wrap width in characters for the current pane/mode; 0 = no wrap.
     /// Set by the render pass from the pane width; consumed by `set_rows`.
     wrap_cols: usize,
@@ -2541,22 +2608,60 @@ struct ItemData {
 }
 
 impl ItemData {
-    /// Install freshly built display rows, keeping the minimap model in sync
-    /// (every row rebuild goes through here).
+    /// Install freshly built (unwrapped) display rows as the cached base,
+    /// keeping the minimap model in sync (every real row rebuild — load, view
+    /// toggle, comment toggle, gap expand, upgrade install — goes through
+    /// here). A pure wrap-width change never calls this; it calls `rewrap`
+    /// directly to re-wrap the existing base instead.
     fn set_rows(&mut self, built: (Vec<Row>, Vec<usize>, Vec<usize>)) {
-        // Soft-wrap is applied here, the single choke point for row updates, so
-        // every rebuild path (load, view toggle, comment toggle, gap expand)
-        // gets it. `wrap_cols == 0` means wrapping is off / width unknown.
+        self.base_rows = built.0;
+        self.base_file_rows = built.1;
+        self.base_hunk_rows = built.2;
+        self.rewrap();
+    }
+
+    /// Derive the displayed rows from the cached base rows at the current
+    /// `wrap_cols`. Cheap: no `build_rows`, no tree-sitter — just wrap +
+    /// minimap. `wrap_cols == 0` means wrapping is off / width unknown.
+    fn rewrap(&mut self) {
         let (rows, file_rows, hunk_rows) = if self.wrap_cols > 0 {
-            wrap_rows(built.0, self.wrap_cols)
+            wrap_rows(self.base_rows.clone(), self.wrap_cols)
         } else {
-            built
+            (
+                self.base_rows.clone(),
+                self.base_file_rows.clone(),
+                self.base_hunk_rows.clone(),
+            )
         };
         self.minimap = minimap_rows(&rows);
         self.minimap_cache.replace(None);
         self.rows = rows;
         self.file_rows = file_rows;
         self.hunk_rows = hunk_rows;
+    }
+
+    /// Re-wrap after a wrap-width change, keeping the viewport anchored: the
+    /// same logical (unwrapped) line stays at the top even though the number
+    /// of display rows it wraps into may change. Mirrors
+    /// `rebuild_rows_anchored`'s anchor save/restore, but ranks rows by
+    /// logical-line start (`nth_row_start`) instead of by non-comment row,
+    /// since here it's the wrap boundaries — not the comment rows — that move.
+    fn rewrap_anchored(&mut self) {
+        let offset = self.scroll.0.borrow().base_handle.offset();
+        let top_px = f32::from(-offset.y).max(0.);
+        let top_row =
+            ((top_px / ROW_HEIGHT).floor() as usize).min(self.rows.len().saturating_sub(1));
+        let frac = top_px - top_row as f32 * ROW_HEIGHT;
+        let count_starts =
+            |rows: &[Row]| rows.iter().filter(|row| !is_continuation_row(row)).count();
+        let top_base = count_starts(&self.rows[..top_row]);
+        self.rewrap();
+        let new_top = nth_row_start(&self.rows, top_base);
+        self.scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(offset.x, px(-(new_top as f32 * ROW_HEIGHT + frac))));
     }
 
     /// Rebuild the display rows after only the comment rows changed
@@ -2573,13 +2678,15 @@ impl ItemData {
             |rows: &[Row]| rows.iter().filter(|row| !is_comment_row(row)).count();
         let top_base = count_noncomment(&self.rows[..top_row]);
         let cursor_base = count_noncomment(&self.rows[..self.cursor.min(self.rows.len())]);
-        self.set_rows(build_rows(
+        let built = build_rows_cached(
             &self.diff,
             self.mode,
             &self.upgrades,
             self.comments.as_ref(),
             self.comments_visible,
-        ));
+            &mut self.hunk_syntax_cache,
+        );
+        self.set_rows(built);
         self.selection = None;
         self.cursor = nth_noncomment_row(&self.rows, cursor_base);
         let new_top = nth_noncomment_row(&self.rows, top_base);
@@ -2703,7 +2810,11 @@ impl ReviewItem {
             ItemState::Ready(data) => {
                 // Fresh patch-derived data: any previous upgrade (and its
                 // expanded gaps) is stale — the upgrade re-runs from scratch.
+                // The hunk-syntax cache is keyed by (file_ix, hunk_ix) into
+                // the diff, which is also being replaced, so it's cleared
+                // alongside the upgrades rather than serving stale spans.
                 data.upgrades.clear();
+                data.hunk_syntax_cache.clear();
                 data.comments = match &data.local_review {
                     Some(local) => Some(local.index()),
                     None => comments,
@@ -2712,12 +2823,13 @@ impl ReviewItem {
                     // Background rows assumed the fetched comments. Local
                     // drafts are reattached here, and view/comment toggles may
                     // have changed while the refresh ran.
-                    (rows, file_rows, hunk_rows) = build_rows(
+                    (rows, file_rows, hunk_rows) = build_rows_cached(
                         &diff,
                         data.mode,
                         &data.upgrades,
                         data.comments.as_ref(),
                         data.comments_visible,
+                        &mut data.hunk_syntax_cache,
                     );
                 }
                 if pr_meta.is_some() {
@@ -2746,6 +2858,10 @@ impl ReviewItem {
                     patch,
                     chat: ChatState::new(),
                     mode,
+                    base_rows: rows.clone(),
+                    base_file_rows: file_rows.clone(),
+                    base_hunk_rows: hunk_rows.clone(),
+                    hunk_syntax_cache: HashMap::new(),
                     rows,
                     file_rows,
                     hunk_rows,
@@ -4465,7 +4581,7 @@ impl ReviewApp {
         if let Some(data) = self.active_data_mut() {
             if data.wrap_cols != target {
                 data.wrap_cols = target;
-                data.rebuild_rows_anchored();
+                data.rewrap_anchored();
                 cx.notify();
             }
         }
@@ -4683,14 +4799,20 @@ impl ReviewApp {
                     .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
                 // Comment anchors live in the same absolute line-number space
                 // the re-diff produces, so threads re-insert at the re-diffed
-                // rows without translation.
-                data.set_rows(build_rows(
+                // rows without translation. The now-upgraded file(s) no longer
+                // consult the hunk-syntax cache (they take the `upgrade`
+                // branch in `build_rows`), so any of their stale entries are
+                // simply unused, not incorrect — every other file's cached
+                // spans are still valid and get reused here.
+                let built = build_rows_cached(
                     &data.diff,
                     data.mode,
                     &data.upgrades,
                     data.comments.as_ref(),
                     data.comments_visible,
-                ));
+                    &mut data.hunk_syntax_cache,
+                );
+                data.set_rows(built);
                 data.cursor = data.cursor.min(data.rows.len().saturating_sub(1));
                 data.selection = None;
                 // Paths can't change in an upgrade, but stats did; rebuilding
@@ -4838,13 +4960,15 @@ impl ReviewApp {
             matches!(row, Row::Gap { file_ix: f, gap_ix: g, .. } if *f == file_ix && *g == gap_ix)
         });
         let old_len = data.rows.len();
-        data.set_rows(build_rows(
+        let built = build_rows_cached(
             &data.diff,
             data.mode,
             &data.upgrades,
             data.comments.as_ref(),
             data.comments_visible,
-        ));
+            &mut data.hunk_syntax_cache,
+        );
+        data.set_rows(built);
         // The gap row is replaced by its hidden context rows (plus any
         // comment threads anchored inside them): the row-count delta is
         // exactly what got inserted.
@@ -5473,13 +5597,15 @@ impl ReviewApp {
             ViewMode::Unified => ViewMode::Split,
             ViewMode::Split => ViewMode::Unified,
         };
-        data.set_rows(build_rows(
+        let built = build_rows_cached(
             &data.diff,
             data.mode,
             &data.upgrades,
             data.comments.as_ref(),
             data.comments_visible,
-        ));
+            &mut data.hunk_syntax_cache,
+        );
+        data.set_rows(built);
         let target = file_pos
             .and_then(|pos| data.file_rows.get(pos).copied())
             .unwrap_or(0);
@@ -9176,6 +9302,61 @@ mod tests {
         assert_eq!(segs[1].text, "éé");
     }
 
+    // Guards the anchor math `rewrap_anchored` relies on to keep the scroll
+    // position stable across a wrap-width change: the same logical line's
+    // rank among row-starts (`nth_row_start`) must resolve to that same
+    // logical line however the base rows happen to be wrapped, even when a
+    // narrower width splits it into several continuation rows and a wider
+    // width doesn't.
+    #[test]
+    fn nth_row_start_survives_a_rewrap() {
+        let patch = "\
+diff --git a/x.rs b/x.rs
+index 0000000..1111111 100644
+--- a/x.rs
++++ b/x.rs
+@@ -1,5 +1,5 @@
+ fn one() {}
+ fn two() {}
+-fn three_long_name_for_wrapping_purposes_to_force_multiple_segments() {}
++fn three_long_name_for_wrapping_purposes_to_force_multiple_segments_v2() {}
+ fn four() {}
+ fn five() {}
+";
+        let diff = diff_core::parse_patch(patch);
+        let base = build_rows(&diff, ViewMode::Unified, &HashMap::new(), None, true).0;
+
+        // Narrow: the long added line wraps into several continuation rows.
+        let (narrow, _, _) = wrap_rows(base.clone(), 20);
+        // Wide: it fits on one row, unwrapped.
+        let (wide, _, _) = wrap_rows(base.clone(), 200);
+        assert!(narrow.len() > base.len(), "narrow wrap should add rows");
+        assert_eq!(wide.len(), base.len(), "wide wrap should add no rows");
+
+        // Anchor on a continuation row of the long line in the narrow wrap.
+        let top_row = narrow
+            .iter()
+            .position(is_continuation_row)
+            .expect("narrow wrap should have produced a continuation row");
+        let top_base = narrow[..top_row]
+            .iter()
+            .filter(|row| !is_continuation_row(row))
+            .count();
+
+        // Re-anchoring at the wide width must land back on the very same
+        // logical line (same old/new line numbers), not merely some row.
+        let new_top = nth_row_start(&wide, top_base);
+        let expected = match &base[top_base] {
+            Row::Line { old_no, new_no, .. } => (*old_no, *new_no),
+            other => panic!("expected a Line row, got {}", row_name(other)),
+        };
+        let got = match &wide[new_top] {
+            Row::Line { old_no, new_no, .. } => (*old_no, *new_no),
+            other => panic!("expected a Line row, got {}", row_name(other)),
+        };
+        assert_eq!(got, expected);
+    }
+
     #[test]
     fn which_on_path_resolves_and_rejects() {
         // `sh` is always on a test runner's PATH; a bogus name never is.
@@ -9212,6 +9393,76 @@ index 0000000..1111111 100644
                 if syntax.iter().any(|&(_, t)| t == syntax::Token::Keyword))
         });
         assert!(added_has_keyword, "added line missing `let` keyword span");
+    }
+
+    // P2: `build_rows_cached` memoizes `hunk_syntax` per (file_ix, hunk_ix) so
+    // repeated rebuilds (comment toggle, gap expand, view toggle, upgrade
+    // install) skip tree-sitter for hunks already highlighted once.
+    #[test]
+    fn build_rows_cached_reuses_hunk_syntax_across_calls() {
+        let patch = "\
+diff --git a/x.rs b/x.rs
+index 0000000..1111111 100644
+--- a/x.rs
++++ b/x.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    let x = 1;
++    let x = 2;
+ }
+";
+        let diff = diff_core::parse_patch(patch);
+        let mut cache = HashMap::new();
+        let (rows, _, _) = build_rows_cached(
+            &diff,
+            ViewMode::Unified,
+            &HashMap::new(),
+            None,
+            false,
+            &mut cache,
+        );
+        assert_eq!(
+            cache.len(),
+            1,
+            "expected exactly one hunk's syntax spans to be cached"
+        );
+        let key = *cache.keys().next().unwrap();
+        assert_eq!(key, (0, 0));
+
+        // First call actually produced real highlighting (sanity, mirrors
+        // `build_rows_emits_syntax_spans`).
+        let highlighted = rows
+            .iter()
+            .filter(|row| matches!(row, Row::Line { syntax, .. } if !syntax.is_empty()))
+            .count();
+        assert!(highlighted > 0, "no Line row carried syntax spans");
+
+        // Tamper with the cached entry: if the second call actually consults
+        // the cache instead of recomputing via `hunk_syntax`, this bogus
+        // value must come back verbatim on every cached row.
+        let sentinel = vec![vec![(0..1, syntax::Token::Comment)]; cache[&key].len()];
+        cache.insert(key, sentinel.clone());
+
+        let (rows2, _, _) = build_rows_cached(
+            &diff,
+            ViewMode::Unified,
+            &HashMap::new(),
+            None,
+            false,
+            &mut cache,
+        );
+        let spans2: Vec<_> = rows2
+            .iter()
+            .filter_map(|row| match row {
+                Row::Line { syntax, .. } => Some(syntax.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            spans2, sentinel,
+            "second call should have returned the cached (tampered) spans, not recomputed ones"
+        );
+        assert_eq!(cache.len(), 1, "cache should not have grown on a hit");
     }
 
     #[test]
