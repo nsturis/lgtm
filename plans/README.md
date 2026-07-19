@@ -10,9 +10,9 @@ sequentially in this order**, not in parallel:
 
 | # | Plan | Findings | Effort | Risk | Status |
 |---|---|---|---|---|---|
-| 001 | Soft-wrap logical-line correctness | C1, C2, C3 | S–M | LOW–MED | TODO |
-| 002 | Diff rebuild performance | P1, P2 | M | MED | TODO |
-| 003 | CI quality gate + clippy + dead code | DX1, DX2, T1 | S | LOW | TODO |
+| 001 | Soft-wrap logical-line correctness | C1, C2, C3 | S–M | LOW–MED | DONE (080a315) |
+| 002 | Diff rebuild performance | P1, P2 | M | MED | DONE (b9191be) |
+| 003 | CI quality gate + clippy + dead code | DX1, DX2, T1 | S | LOW | DONE (d8518d1) |
 
 **Order rationale:** 001 and 002 fix/refactor render code; 003 runs last so its
 `clippy -D warnings` gate reflects the final state (and clears any warnings 001/002
