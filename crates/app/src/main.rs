@@ -79,7 +79,16 @@ actions!(
         SubmitReview,
         GoToDefinition,
         NavBack,
-        NavForward
+        NavForward,
+        GoToItem1,
+        GoToItem2,
+        GoToItem3,
+        GoToItem4,
+        GoToItem5,
+        GoToItem6,
+        GoToItem7,
+        GoToItem8,
+        GoToItem9
     ]
 );
 
@@ -151,6 +160,15 @@ fn main() {
                 KeyBinding::new("cmd-right", NavForward, Some("ReviewApp")),
                 KeyBinding::new("alt-left", NavBack, Some("ReviewApp")),
                 KeyBinding::new("alt-right", NavForward, Some("ReviewApp")),
+                KeyBinding::new("cmd-1", GoToItem1, Some("ReviewApp")),
+                KeyBinding::new("cmd-2", GoToItem2, Some("ReviewApp")),
+                KeyBinding::new("cmd-3", GoToItem3, Some("ReviewApp")),
+                KeyBinding::new("cmd-4", GoToItem4, Some("ReviewApp")),
+                KeyBinding::new("cmd-5", GoToItem5, Some("ReviewApp")),
+                KeyBinding::new("cmd-6", GoToItem6, Some("ReviewApp")),
+                KeyBinding::new("cmd-7", GoToItem7, Some("ReviewApp")),
+                KeyBinding::new("cmd-8", GoToItem8, Some("ReviewApp")),
+                KeyBinding::new("cmd-9", GoToItem9, Some("ReviewApp")),
                 // Global (None context): must work while the open input is focused.
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-j", ToggleChat, None),
@@ -4779,6 +4797,12 @@ impl ReviewApp {
         }
     }
 
+    fn goto_item(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if n < self.items.len() {
+            self.activate(n, window, cx);
+        }
+    }
+
     fn close_item(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.items.len() {
             return;
@@ -7898,6 +7922,15 @@ impl Render for ReviewApp {
             }))
             .on_action(cx.listener(|this, _: &NextItem, _, cx| this.cycle_items(1, cx)))
             .on_action(cx.listener(|this, _: &PrevItem, _, cx| this.cycle_items(-1, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem1, window, cx| this.goto_item(0, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem2, window, cx| this.goto_item(1, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem3, window, cx| this.goto_item(2, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem4, window, cx| this.goto_item(3, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem5, window, cx| this.goto_item(4, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem6, window, cx| this.goto_item(5, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem7, window, cx| this.goto_item(6, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem8, window, cx| this.goto_item(7, window, cx)))
+            .on_action(cx.listener(|this, _: &GoToItem9, window, cx| this.goto_item(8, window, cx)))
             // The open input propagates Escape when it has nothing of its own
             // to dismiss: hand focus back to the diff.
             .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
