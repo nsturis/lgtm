@@ -3063,6 +3063,58 @@ fn filter_base_refs(all: &[String], query: &str) -> Vec<usize> {
     scored.into_iter().map(|(_, ix)| ix).collect()
 }
 
+/// A row in the repo-home palette step.
+#[derive(Debug, Clone, PartialEq)]
+enum HomeRow {
+    /// A repo "owner/repo"; `pinned` marks favourites.
+    Repo { slug: String, pinned: bool },
+    /// The "open local folder" affordance, always last.
+    Folder,
+}
+
+/// Rows for the repo-home step: pinned repos first (in pin order), then recent
+/// repos not already pinned, filtered by a case-insensitive substring query,
+/// with the Folder row last (kept only when it matches a non-empty query).
+fn home_rows(pinned: &[String], recent: &[String], query: &str) -> Vec<HomeRow> {
+    let q = query.trim().to_lowercase();
+    let matches = |s: &str| q.is_empty() || s.to_lowercase().contains(&q);
+    let mut rows = Vec::new();
+    for slug in pinned {
+        if matches(slug) {
+            rows.push(HomeRow::Repo { slug: slug.clone(), pinned: true });
+        }
+    }
+    for slug in recent {
+        if pinned.iter().any(|p| p == slug) {
+            continue;
+        }
+        if matches(slug) {
+            rows.push(HomeRow::Repo { slug: slug.clone(), pinned: false });
+        }
+    }
+    if q.is_empty() || "open local folder".contains(&q) {
+        rows.push(HomeRow::Folder);
+    }
+    rows
+}
+
+/// Display order for a repo's PRs: pinned PRs first, then the rest, both
+/// restricted to `filtered` (the fuzzy result) and preserving its order.
+/// Returns indices into `all`.
+fn order_prs(all: &[gh::PrSummary], filtered: &[usize], pinned: &[u64]) -> Vec<usize> {
+    let mut pinned_ix = Vec::new();
+    let mut rest_ix = Vec::new();
+    for &ix in filtered {
+        if pinned.contains(&all[ix].number) {
+            pinned_ix.push(ix);
+        } else {
+            rest_ix.push(ix);
+        }
+    }
+    pinned_ix.extend(rest_ix);
+    pinned_ix
+}
+
 /// One row of the palette's PR list: state dot, #number, title, author, head
 /// branch. Clicking opens the PR just like enter does.
 fn palette_pr_row(
@@ -8656,6 +8708,43 @@ index 0000000..1111111 100644
         assert_eq!(filter_prs(&all, "bob"), vec![1]);
         assert_eq!(filter_prs(&all, "crash"), vec![0]);
         assert!(filter_prs(&all, "zzzqqq").is_empty());
+    }
+
+    #[test]
+    fn home_rows_pinned_first_then_recent_then_folder() {
+        let pinned = vec!["a/api".to_string(), "a/web".to_string()];
+        let recent = vec!["a/web".to_string(), "b/infra".to_string()];
+        let rows = home_rows(&pinned, &recent, "");
+        assert_eq!(
+            rows,
+            vec![
+                HomeRow::Repo { slug: "a/api".into(), pinned: true },
+                HomeRow::Repo { slug: "a/web".into(), pinned: true },
+                HomeRow::Repo { slug: "b/infra".into(), pinned: false }, // a/web deduped
+                HomeRow::Folder,
+            ]
+        );
+    }
+
+    #[test]
+    fn home_rows_filters_by_query_and_drops_folder() {
+        let pinned = vec!["a/api".to_string()];
+        let recent = vec!["b/infra".to_string()];
+        let rows = home_rows(&pinned, &recent, "infra");
+        assert_eq!(rows, vec![HomeRow::Repo { slug: "b/infra".into(), pinned: false }]);
+    }
+
+    #[test]
+    fn order_prs_moves_pinned_to_top_preserving_order() {
+        let prs = vec![
+            pr(10, "PR 10", "me", "branch"),
+            pr(20, "PR 20", "me", "branch"),
+            pr(30, "PR 30", "me", "branch"),
+        ];
+        let filtered = vec![0, 1, 2];
+        let ordered = order_prs(&prs, &filtered, &[30, 10]);
+        // pinned (in filtered order: 10 then 30), then the rest (20)
+        assert_eq!(ordered, vec![0, 2, 1]);
     }
 
     /// (depth, display name, Some(file_ix) for files / None for dirs).
