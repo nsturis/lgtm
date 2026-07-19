@@ -61,6 +61,7 @@ actions!(
     [
         NextFile,
         PrevFile,
+        ToggleViewed,
         NextHunk,
         PrevHunk,
         GoToTop,
@@ -221,6 +222,7 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("]", NextFile, Some("ReviewApp")),
                 KeyBinding::new("[", PrevFile, Some("ReviewApp")),
+                KeyBinding::new("shift-v", ToggleViewed, Some("ReviewApp")),
                 KeyBinding::new("n", NextHunk, Some("ReviewApp")),
                 KeyBinding::new("p", PrevHunk, Some("ReviewApp")),
                 KeyBinding::new("home", GoToTop, Some("ReviewApp")),
@@ -1211,6 +1213,31 @@ fn file_signature(file: &FileDiff) -> u64 {
         }
     }
     h.finish()
+}
+
+/// The nearest file-header row after `cursor` whose file isn't viewed, from
+/// `targets` (file-header rows, index-aligned with file_ix, e.g.
+/// `ItemData::file_rows`). Falls back to the nearest file-header row
+/// regardless of viewed state when every remaining one is viewed, so an
+/// all-viewed diff doesn't get stuck.
+fn next_unviewed_target(targets: &[usize], viewed: &HashSet<usize>, cursor: usize) -> Option<usize> {
+    targets
+        .iter()
+        .enumerate()
+        .find(|&(file_ix, &row)| row > cursor && !viewed.contains(&file_ix))
+        .map(|(_, &row)| row)
+        .or_else(|| targets.iter().find(|&&row| row > cursor).copied())
+}
+
+/// Mirrors [`next_unviewed_target`], searching backwards.
+fn prev_unviewed_target(targets: &[usize], viewed: &HashSet<usize>, cursor: usize) -> Option<usize> {
+    targets
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|&(file_ix, &row)| row < cursor && !viewed.contains(&file_ix))
+        .map(|(_, &row)| row)
+        .or_else(|| targets.iter().rev().find(|&&row| row < cursor).copied())
 }
 
 /// Flatten the diff into display rows plus the row indices of file headers and
@@ -4714,6 +4741,22 @@ impl ReviewApp {
         }
     }
 
+    /// The file whose header row is at (or scrolled past) the top of the
+    /// active item's viewport — the same "current file" the sidebar
+    /// highlights and follows. A pending `scroll_to_item` (from `]`/`[` or a
+    /// tree click) hasn't reached the offset yet, so it takes precedence;
+    /// otherwise the same offset/ROW_HEIGHT math the selection hit test uses.
+    fn active_file_ix(&self) -> Option<usize> {
+        let data = self.active_data()?;
+        let scroll = data.scroll.0.borrow();
+        let top_row = match &scroll.deferred_scroll_to_item {
+            Some(deferred) => deferred.item_index,
+            None => (f32::from(-scroll.base_handle.offset().y) / ROW_HEIGHT).max(0.) as usize,
+        };
+        drop(scroll);
+        data.file_rows.iter().rposition(|&ix| ix <= top_row)
+    }
+
     /// Advance width of one monospace cell, measured once via the text system
     /// (Menlo is monospace, so 'm' stands in for every glyph).
     fn char_width(&mut self, window: &Window) -> Pixels {
@@ -7896,18 +7939,8 @@ impl ReviewApp {
                     .map(TreeListRow::FilteredFile)
                     .collect();
             }
-            // Follow the diff: highlight the file whose header row is at (or
-            // scrolled past) the top of the viewport. A pending scroll_to_item
-            // (from ]/[ or a tree click) hasn't reached the offset yet, so it
-            // takes precedence; otherwise the same offset/ROW_HEIGHT math the
-            // selection hit test uses.
-            let scroll = data.scroll.0.borrow();
-            let top_row = match &scroll.deferred_scroll_to_item {
-                Some(deferred) => deferred.item_index,
-                None => (f32::from(-scroll.base_handle.offset().y) / ROW_HEIGHT).max(0.) as usize,
-            };
-            drop(scroll);
-            current_file = data.file_rows.iter().rposition(|&ix| ix <= top_row);
+            // Follow the diff: highlight the file the viewport is showing.
+            current_file = self.active_file_ix();
             current_row = current_file.and_then(|file| {
                 tree_rows.iter().position(|row| match row {
                     TreeListRow::Entry(ix) => matches!(
@@ -8843,18 +8876,29 @@ impl Render for ReviewApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &NextFile, _, cx| {
-                let targets = this
-                    .active_data()
-                    .map(|d| d.file_rows.clone())
-                    .unwrap_or_default();
-                this.jump_next(&targets, cx)
+                let Some(data) = this.active_data() else {
+                    return;
+                };
+                if let Some(target) =
+                    next_unviewed_target(&data.file_rows, &data.viewed, data.cursor)
+                {
+                    this.jump(target, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &PrevFile, _, cx| {
-                let targets = this
-                    .active_data()
-                    .map(|d| d.file_rows.clone())
-                    .unwrap_or_default();
-                this.jump_prev(&targets, cx)
+                let Some(data) = this.active_data() else {
+                    return;
+                };
+                if let Some(target) =
+                    prev_unviewed_target(&data.file_rows, &data.viewed, data.cursor)
+                {
+                    this.jump(target, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleViewed, _, cx| {
+                if let Some(file_ix) = this.active_file_ix() {
+                    this.toggle_viewed(file_ix, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &NextHunk, _, cx| {
                 let targets = this
@@ -9616,6 +9660,36 @@ index 0000000..1111111 100644
             ..base_src
         });
         assert_ne!(review_id(&local), review_id(&local2));
+    }
+
+    #[test]
+    fn next_prev_unviewed_target_skip_viewed_files() {
+        // Five files' header rows.
+        let targets = vec![0, 10, 20, 30, 40];
+        let mut viewed = HashSet::new();
+
+        // Nothing viewed: plain next/prev.
+        assert_eq!(next_unviewed_target(&targets, &viewed, 0), Some(10));
+        assert_eq!(prev_unviewed_target(&targets, &viewed, 40), Some(30));
+
+        // File at row 10 (index 1) is viewed: next from row 0 skips it.
+        viewed.insert(1);
+        assert_eq!(next_unviewed_target(&targets, &viewed, 0), Some(20));
+        // Prev from row 20 also skips the viewed file at row 10, landing on 0.
+        assert_eq!(prev_unviewed_target(&targets, &viewed, 20), Some(0));
+
+        // No unviewed candidate ahead of the cursor, but one exists behind:
+        // next still returns None past the end (no wraparound).
+        assert_eq!(next_unviewed_target(&targets, &viewed, 40), None);
+
+        // All files viewed: falls back to the plain next/prev instead of
+        // getting stuck.
+        let all_viewed: HashSet<usize> = (0..targets.len()).collect();
+        assert_eq!(next_unviewed_target(&targets, &all_viewed, 0), Some(10));
+        assert_eq!(prev_unviewed_target(&targets, &all_viewed, 40), Some(30));
+        // And still None past the ends even in the all-viewed fallback.
+        assert_eq!(next_unviewed_target(&targets, &all_viewed, 40), None);
+        assert_eq!(prev_unviewed_target(&targets, &all_viewed, 0), None);
     }
 
     #[test]
