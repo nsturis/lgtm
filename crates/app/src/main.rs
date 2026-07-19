@@ -399,6 +399,28 @@ fn is_comment_row(row: &Row) -> bool {
     )
 }
 
+/// True when `row` is a soft-wrap continuation (a later visual segment of a
+/// logical line), as marked by `wrap_rows`: a unified line with both numbers
+/// cleared, or a split row whose present cell(s) carry the no==0 sentinel.
+fn is_continuation_row(row: &Row) -> bool {
+    match row {
+        Row::Line {
+            old_no: None,
+            new_no: None,
+            ..
+        } => true,
+        Row::SplitLine { left, right } => {
+            let l = left.as_ref();
+            let r = right.as_ref();
+            // At least one present cell, and every present cell is a continuation.
+            (l.is_some() || r.is_some())
+                && l.is_none_or(|c| c.no == 0)
+                && r.is_none_or(|c| c.no == 0)
+        }
+        _ => false,
+    }
+}
+
 /// Index of the `n`-th non-comment row (0-based), clamped to the last row.
 /// Comment rows are pure insertions relative to the diff rows, so this maps
 /// a position across rebuilds that only add or remove comment rows.
@@ -901,17 +923,23 @@ fn row_selection_range(sel: &Selection, row_ix: usize, row: &Row) -> Option<Rang
 
 /// The selected text: each contributing row's selected substring, joined with
 /// newlines. Header/spacer rows and absent split cells are skipped entirely
-/// (no blank line for them).
+/// (no blank line for them). A soft-wrap continuation row concatenates to the
+/// previous segment with no separator, since it's the same logical line.
 fn selection_text(sel: &Selection, rows: &[Row]) -> String {
     let (start, end) = sel.ordered();
-    let mut parts = Vec::new();
+    let mut out = String::new();
+    let mut wrote_any = false;
     for ix in start.row..=end.row.min(rows.len().saturating_sub(1)) {
         if let Some(range) = row_selection_range(sel, ix, &rows[ix]) {
             let text = row_side_text(&rows[ix], sel.side).unwrap_or_default();
-            parts.push(&text[range]);
+            if wrote_any && !is_continuation_row(&rows[ix]) {
+                out.push('\n');
+            }
+            out.push_str(&text[range]);
+            wrote_any = true;
         }
     }
-    parts.join("\n")
+    out
 }
 
 /// Guardrails: hunk sides bigger than this render without syntax highlighting.
@@ -1952,12 +1980,20 @@ fn line_frac(text: &str) -> f32 {
     text.chars().take(MAX_MINIMAP_CHARS).count() as f32 / MAX_MINIMAP_CHARS as f32
 }
 
-/// Reduce display rows to minimap rows, one per row, index-aligned.
+/// Reduce display rows to minimap rows, one per row, index-aligned (indices
+/// stay in visual-row space, matching `minimap_scrub_to`'s viewport math).
 fn minimap_rows(rows: &[Row]) -> Vec<MinimapRow> {
     rows.iter()
         .map(|row| match row {
             // Comment rows stay blank in the minimap: threads are short and
-            // already flagged by the file-header counts.
+            // already flagged by the file-header counts. Soft-wrap continuation
+            // rows are also blank: they're the same logical line as the row
+            // before them, so they shouldn't add extra colored weight — kept
+            // as an empty tick (not dropped) to preserve index alignment.
+            _ if is_continuation_row(row) => MinimapRow {
+                kind: MinimapKind::Blank,
+                len_frac: 0.,
+            },
             Row::Spacer
             | Row::Binary
             | Row::CommentHeader { .. }
@@ -3892,8 +3928,13 @@ fn selection_info(
         }
         let no = match (&rows[ix], sel.side) {
             (Row::Line { old_no, new_no, .. }, _) => new_no.or(*old_no),
-            (Row::SplitLine { left, .. }, SelSide::Left) => left.as_ref().map(|c| c.no),
-            (Row::SplitLine { right, .. }, SelSide::Right) => right.as_ref().map(|c| c.no),
+            // no == 0 is the continuation sentinel; it must not drag `lo` to 0.
+            (Row::SplitLine { left, .. }, SelSide::Left) => {
+                left.as_ref().map(|c| c.no).filter(|&no| no != 0)
+            }
+            (Row::SplitLine { right, .. }, SelSide::Right) => {
+                right.as_ref().map(|c| c.no).filter(|&no| no != 0)
+            }
             _ => None,
         };
         if let Some(no) = no {
@@ -4264,10 +4305,12 @@ fn comment_anchor(rows: &[Row], row_ix: usize, side: SelSide) -> Option<(Comment
         ) => Some((CommentSide::Left, (*old_no)? as u64)),
         (Row::Line { new_no, .. }, _) => Some((CommentSide::Right, (*new_no)? as u64)),
         (Row::SplitLine { left, .. }, SelSide::Left) => {
-            Some((CommentSide::Left, left.as_ref()?.no as u64))
+            let c = left.as_ref()?;
+            (c.no != 0).then_some((CommentSide::Left, c.no as u64))
         }
         (Row::SplitLine { right, .. }, SelSide::Right) => {
-            Some((CommentSide::Right, right.as_ref()?.no as u64))
+            let c = right.as_ref()?;
+            (c.no != 0).then_some((CommentSide::Right, c.no as u64))
         }
         _ => None,
     }
@@ -9720,6 +9763,53 @@ index 0000000..1111111 100644
         assert_eq!(selection_text(&quoted, &rows), "\"héllo");
     }
 
+    /// A soft-wrap continuation row (no numbers on both sides in unified, or
+    /// no==0 cells in split) must concatenate to the previous row with no
+    /// interior newline, or copy/AI-chat text gets corrupted.
+    #[test]
+    fn copy_reassembles_wrapped_line_without_interior_newline() {
+        let continuation = |text: &str| Row::Line {
+            old_no: None,
+            new_no: None,
+            kind: LineKind::Context,
+            text: text.to_string().into(),
+            intra: Vec::new(),
+            syntax: Vec::new(),
+        };
+        let rows = vec![line("first part of a "), continuation("wrapped line")];
+        let all = sel(SelSide::Unified, (0, 0), (1, 20));
+        assert_eq!(
+            selection_text(&all, &rows),
+            "first part of a wrapped line"
+        );
+        // A fresh logical line after a continuation still gets its newline.
+        let rows = vec![
+            line("first part of a "),
+            continuation("wrapped line"),
+            line("next logical line"),
+        ];
+        let all = sel(SelSide::Unified, (0, 0), (2, 20));
+        assert_eq!(
+            selection_text(&all, &rows),
+            "first part of a wrapped line\nnext logical line"
+        );
+
+        // Split view: a no==0 cell on the locked side is a continuation.
+        let split_cont = |text: &str| Row::SplitLine {
+            left: Some(Cell {
+                no: 0,
+                kind: LineKind::Context,
+                text: text.to_string().into(),
+                intra: Vec::new(),
+                syntax: Vec::new(),
+            }),
+            right: None,
+        };
+        let rows = vec![split(Some("first part "), None), split_cont("wrapped")];
+        let left = sel(SelSide::Left, (0, 0), (1, 10));
+        assert_eq!(selection_text(&left, &rows), "first part wrapped");
+    }
+
     // --- Minimap -----------------------------------------------------------
 
     fn mrow(kind: MinimapKind, len_frac: f32) -> MinimapRow {
@@ -9810,6 +9900,49 @@ index 0000000..1111111 100644
         assert_eq!(line_frac(""), 0.);
         assert_eq!(line_frac("abcd"), 4. / 160.);
         assert_eq!(line_frac(&"x".repeat(1000)), 1.);
+    }
+
+    /// Soft-wrap continuation rows must not add a colored tick (they're the
+    /// same logical line as the row before them), but the minimap array must
+    /// stay index-aligned with `rows` so `minimap_scrub_to`'s visual-row-space
+    /// viewport math keeps working unchanged.
+    #[test]
+    fn minimap_rows_blanks_continuations_but_keeps_index_alignment() {
+        let continuation = |text: &str| Row::Line {
+            old_no: None,
+            new_no: None,
+            kind: LineKind::Context,
+            text: text.to_string().into(),
+            intra: Vec::new(),
+            syntax: Vec::new(),
+        };
+        let rows = vec![line("first part"), continuation("wrapped tail")];
+        let mm = minimap_rows(&rows);
+        assert_eq!(mm.len(), rows.len());
+        assert_eq!(mm[0].kind, MinimapKind::Context);
+        assert_eq!(mm[1], mrow(MinimapKind::Blank, 0.));
+
+        // Split: a no==0 continuation cell is also blanked.
+        let split_cont = |left: &str, right: &str| Row::SplitLine {
+            left: Some(Cell {
+                no: 0,
+                kind: LineKind::Context,
+                text: left.to_string().into(),
+                intra: Vec::new(),
+                syntax: Vec::new(),
+            }),
+            right: Some(Cell {
+                no: 0,
+                kind: LineKind::Context,
+                text: right.to_string().into(),
+                intra: Vec::new(),
+                syntax: Vec::new(),
+            }),
+        };
+        let rows = vec![split(Some("first"), Some("first")), split_cont("wrap", "wrap")];
+        let mm = minimap_rows(&rows);
+        assert_eq!(mm.len(), rows.len());
+        assert_eq!(mm[1], mrow(MinimapKind::Blank, 0.));
     }
 
     #[test]
@@ -10405,6 +10538,32 @@ index 0000000..1111111 100644
             comment_anchor(&rows, h2 + 2, SelSide::Left),
             Some((CommentSide::Left, 11))
         );
+    }
+
+    /// A split cell with the no==0 continuation sentinel must not anchor a
+    /// comment to line 0 (matching unified, which already yields None for
+    /// continuations via `old_no`/`new_no` being `None`).
+    #[test]
+    fn comment_anchor_refuses_continuation_split_cells() {
+        let cont_row = Row::SplitLine {
+            left: Some(Cell {
+                no: 0,
+                kind: LineKind::Context,
+                text: "wrapped".into(),
+                intra: Vec::new(),
+                syntax: Vec::new(),
+            }),
+            right: Some(Cell {
+                no: 0,
+                kind: LineKind::Context,
+                text: "wrapped".into(),
+                intra: Vec::new(),
+                syntax: Vec::new(),
+            }),
+        };
+        let rows = vec![cont_row];
+        assert_eq!(comment_anchor(&rows, 0, SelSide::Left), None);
+        assert_eq!(comment_anchor(&rows, 0, SelSide::Right), None);
     }
 
     #[test]
