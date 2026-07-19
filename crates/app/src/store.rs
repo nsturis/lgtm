@@ -35,6 +35,10 @@ pub struct Store {
     /// Pinned PR numbers per repo ("owner/repo" -> numbers).
     #[serde(default)]
     pub pinned_prs: BTreeMap<String, Vec<u64>>,
+    /// Reviewed files: review id → (path → content signature). A file is viewed
+    /// only while its current signature matches, so a changed file auto-resets.
+    #[serde(default)]
+    pub viewed: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
 impl Store {
@@ -124,6 +128,28 @@ impl Store {
             self.pinned_prs.remove(slug);
         }
     }
+
+    pub fn is_viewed(&self, review: &str, path: &str, sig: u64) -> bool {
+        self.viewed
+            .get(review)
+            .and_then(|m| m.get(path))
+            .is_some_and(|s| *s == sig)
+    }
+
+    /// Mark/unmark `path` viewed at signature `sig`; drops empty maps.
+    pub fn set_viewed(&mut self, review: &str, path: &str, sig: u64, viewed: bool) {
+        if viewed {
+            self.viewed
+                .entry(review.to_string())
+                .or_default()
+                .insert(path.to_string(), sig);
+        } else if let Some(m) = self.viewed.get_mut(review) {
+            m.remove(path);
+            if m.is_empty() {
+                self.viewed.remove(review);
+            }
+        }
+    }
 }
 
 /// `~/Library/Application Support/lgtm/state.json` on macOS, via `dirs`.
@@ -201,6 +227,36 @@ mod tests {
         // Same number in a different repo is a distinct entry.
         s.note_recent_pr("o/other", 5, "other");
         assert_eq!(s.recent_prs.iter().filter(|p| p.number == 5).count(), 2);
+    }
+
+    #[test]
+    fn viewed_set_check_and_unset() {
+        let mut s = Store::default();
+        assert!(!s.is_viewed("acme/api#1", "src/lib.rs", 42));
+
+        s.set_viewed("acme/api#1", "src/lib.rs", 42, true);
+        assert!(s.is_viewed("acme/api#1", "src/lib.rs", 42));
+
+        // A changed signature (the file's diff changed) auto-resets.
+        assert!(!s.is_viewed("acme/api#1", "src/lib.rs", 99));
+
+        s.set_viewed("acme/api#1", "src/lib.rs", 42, false);
+        assert!(!s.is_viewed("acme/api#1", "src/lib.rs", 42));
+        // Unsetting the only viewed file drops the now-empty inner map.
+        assert!(!s.viewed.contains_key("acme/api#1"));
+    }
+
+    #[test]
+    fn viewed_round_trips_through_disk() {
+        let path = temp_path("viewed-roundtrip");
+        let mut s = Store::default();
+        s.set_viewed("acme/api#1", "src/lib.rs", 42, true);
+        s.set_viewed("acme/api#1", "README.md", 7, true);
+        s.save_to(&path);
+        let loaded = Store::load_from(&path);
+        assert_eq!(s, loaded);
+        assert!(loaded.is_viewed("acme/api#1", "src/lib.rs", 42));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
