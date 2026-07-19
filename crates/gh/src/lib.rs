@@ -548,11 +548,7 @@ fn gh(args: &[&str]) -> Result<String> {
         .output()
         .map_err(|err| anyhow!("failed to run gh (is the GitHub CLI installed?): {err}"))?;
     if !output.status.success() {
-        bail!(
-            "gh {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("gh {} failed: {}", args.join(" "), gh_error_detail(&output));
     }
     String::from_utf8(output.stdout).context("gh output was not UTF-8")
 }
@@ -576,13 +572,32 @@ fn gh_with_stdin(args: &[&str], stdin: &[u8]) -> Result<String> {
         .context("failed to write gh stdin")?;
     let output = child.wait_with_output().context("failed to run gh")?;
     if !output.status.success() {
-        bail!(
-            "gh {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("gh {} failed: {}", args.join(" "), gh_error_detail(&output));
     }
     String::from_utf8(output.stdout).context("gh output was not UTF-8")
+}
+
+/// Best-effort human-readable failure reason from a failed `gh` invocation.
+/// `gh api` writes only a terse `gh: <reason> (HTTP <code>)` to stderr but puts
+/// the field-level detail (e.g. GitHub 422 `errors[]`, "must be part of the
+/// diff") in the JSON response body on stdout — so surface both.
+fn gh_error_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts: Vec<&str> = Vec::new();
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        parts.push(stderr);
+    }
+    let stdout = stdout.trim();
+    if !stdout.is_empty() {
+        parts.push(stdout);
+    }
+    if parts.is_empty() {
+        "(no output)".to_string()
+    } else {
+        parts.join(" — ")
+    }
 }
 
 #[cfg(test)]
