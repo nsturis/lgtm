@@ -4633,6 +4633,17 @@ impl ReviewApp {
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // If we're reviewing a PR, jump straight to that repo's open-PR list so
+        // picking a sibling PR is a single step. Esc/back returns to the repo
+        // home (pinned + recent repos and PRs).
+        let current_pr_repo = match self.active_item().map(|item| &item.source) {
+            Some(Source::Pr(loc)) => Some((loc.owner.clone(), loc.repo.clone())),
+            _ => None,
+        };
+        if let Some((owner, repo)) = current_pr_repo {
+            self.palette_fetch_prs(owner, repo, window, cx);
+            return;
+        }
         self.palette = Some(PaletteStep::RepoHome { selected: 0 });
         self.palette_gen += 1;
         self.set_palette_input("", "owner/repo to open its pull requests, or filter…", window, cx);
