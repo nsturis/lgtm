@@ -4566,6 +4566,12 @@ impl ReviewApp {
                 self.open_error = None;
                 self.open_input
                     .update(cx, |state, cx| state.set_value("", window, cx));
+                // Opening a PR from the toolbar should feed the cmd-k repo home
+                // too, so recents fill up however you open things.
+                if let Source::Pr(loc) = &source {
+                    self.store.note_recent_repo(&loc.repo_slug());
+                    self.save_store();
+                }
                 self.open_item(source, cx);
                 window.focus(&self.focus_handle);
             }
@@ -4597,7 +4603,7 @@ impl ReviewApp {
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = Some(PaletteStep::RepoHome { selected: 0 });
         self.palette_gen += 1;
-        self.set_palette_input("", "type a repo (owner/repo) or filter…", window, cx);
+        self.set_palette_input("", "owner/repo to open its pull requests, or filter…", window, cx);
         cx.notify();
     }
 
@@ -4616,14 +4622,14 @@ impl ReviewApp {
             Some(PaletteStep::RepoInput { .. }) => {
                 self.palette = Some(PaletteStep::RepoHome { selected: 0 });
                 self.palette_gen += 1;
-                self.set_palette_input("", "type a repo (owner/repo) or filter…", window, cx);
+                self.set_palette_input("", "owner/repo to open its pull requests, or filter…", window, cx);
                 cx.notify();
             }
             Some(PaletteStep::PrList { repo, .. }) => {
                 let repo = repo.clone();
                 self.palette = Some(PaletteStep::RepoHome { selected: 0 });
                 self.palette_gen += 1;
-                self.set_palette_input(&repo, "type a repo (owner/repo) or filter…", window, cx);
+                self.set_palette_input(&repo, "owner/repo to open its pull requests, or filter…", window, cx);
                 cx.notify();
             }
             Some(PaletteStep::LocalBaseList { .. }) => self.close_palette(window, cx),
@@ -7353,6 +7359,20 @@ impl ReviewApp {
                 let selected = *selected;
                 let rows = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query);
                 let mut list = div().py_1().flex().flex_col();
+                // The primary action of this screen is "type owner/repo to open
+                // a GitHub PR". Without a visible cue, a first-run user (no pins
+                // or recents) sees only the folder row and concludes GitHub
+                // support is gone — so keep this hint always visible.
+                list = list.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(theme::overlay0())
+                        .child(SharedString::from(
+                            "Type owner/repo and press Enter to browse its pull requests · ★ to pin",
+                        )),
+                );
                 if rows.is_empty() {
                     list = list.child(
                         div().px_3().py_2().text_color(theme::overlay0())
