@@ -49,6 +49,12 @@ const UNIFIED_GUTTER: f32 = 44. + 44. + 28.;
 const SPLIT_GUTTER: f32 = 44. + 28.;
 const SPLIT_DIVIDER: f32 = 6.0;
 
+/// Sidebar column width: default, and the bounds its draggable right edge
+/// clamps to.
+const SIDEBAR_DEFAULT_WIDTH: f32 = 260.0;
+const SIDEBAR_MIN_WIDTH: f32 = 180.0;
+const SIDEBAR_MAX_WIDTH: f32 = 600.0;
+
 actions!(
     lgtm,
     [
@@ -1551,7 +1557,11 @@ fn render_row(
                 Some((SelSide::Right, range)) => (None, Some(range)),
                 _ => (None, None),
             };
-            let cell = |cell: &Option<Cell>, sel: Option<Range<usize>>| {
+            // `side_ix` (0 = left, 1 = right) only distinguishes the two
+            // halves' scroll-container ids; the gutter and text are identical.
+            let cell = |cell: &Option<Cell>, sel: Option<Range<usize>>, side_ix: usize| {
+                // overflow_hidden clips a scrolled cell at the divider so it
+                // never bleeds into the other half.
                 let base = div()
                     .flex_1()
                     .min_w_0()
@@ -1585,13 +1595,23 @@ fn render_row(
                         .text_color(marker_color)
                         .child(SharedString::from(marker)),
                 )
-                .child(div().whitespace_nowrap().child(line_content(
-                    &cell.text,
-                    &cell.syntax,
-                    &cell.intra,
-                    word_bg,
-                    sel,
-                )))
+                // The code column scrolls horizontally on its own (gutter stays
+                // put); the stable id lets gpui remember each line's offset.
+                .child(
+                    div()
+                        .id(("split-code", ix * 2 + side_ix))
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_x_scroll()
+                        .whitespace_nowrap()
+                        .child(line_content(
+                            &cell.text,
+                            &cell.syntax,
+                            &cell.intra,
+                            word_bg,
+                            sel,
+                        )),
+                )
             };
             // w_full is load-bearing: without a definite row width the row
             // sizes to fit-content and the flex_1 halves collapse to their
@@ -1600,7 +1620,7 @@ fn render_row(
                 .h(row_height)
                 .w_full()
                 .flex()
-                .child(cell(left, left_sel))
+                .child(cell(left, left_sel, 0))
                 .child(
                     div()
                         .w(px(6.))
@@ -1611,7 +1631,7 @@ fn render_row(
                         .border_r_1()
                         .border_color(theme::surface0()),
                 )
-                .child(cell(right, right_sel))
+                .child(cell(right, right_sel, 1))
                 .into_any_element()
         }
     }
@@ -3806,6 +3826,11 @@ struct ReviewApp {
     items: Vec<ReviewItem>,
     active: usize,
     sidebar_visible: bool,
+    /// Sidebar column width, adjustable by dragging its right edge.
+    sidebar_width: Pixels,
+    /// Active sidebar resize drag: (mouse x, sidebar width) captured at
+    /// mouse-down; None when not resizing.
+    sidebar_resize: Option<(Pixels, Pixels)>,
     open_input: gpui::Entity<InputState>,
     open_error: Option<SharedString>,
     /// Fuzzy filter over the active item's file tree (`/` focuses it).
@@ -3928,6 +3953,8 @@ impl ReviewApp {
             items: Vec::new(),
             active: 0,
             sidebar_visible: !errors.is_empty() || sources.len() != 1,
+            sidebar_width: px(SIDEBAR_DEFAULT_WIDTH),
+            sidebar_resize: None,
             open_input,
             open_error: errors.first().cloned().map(SharedString::from),
             tree_filter_input,
@@ -4020,8 +4047,12 @@ impl ReviewApp {
         let row = ((y / ROW_HEIGHT).floor().max(0.) as usize).min(data.rows.len() - 1);
         let rel_x = f32::from(position.x - bounds.left());
         let (side, text_x) = match data.mode {
-            // offset.x is negative when scrolled right (unified mode only;
-            // split uses FitList and never scrolls horizontally).
+            // offset.x is negative when scrolled right. The whole list only
+            // scrolls horizontally in unified mode; split rows are FitList, so
+            // this offset is unified-only. (Split *cells* scroll their code
+            // column independently, but that per-cell offset isn't reflected
+            // here, so a column hit in a horizontally-scrolled split cell is
+            // approximate — selection stays exact at the unscrolled default.)
             ViewMode::Unified => (
                 SelSide::Unified,
                 rel_x - f32::from(offset.x) - UNIFIED_GUTTER,
@@ -6792,6 +6823,32 @@ impl ReviewApp {
             })
     }
 
+    /// Thin draggable strip on the sidebar's right edge. Mouse-down snapshots
+    /// the drag origin; the root's mouse-move/up handlers do the actual
+    /// resizing (they keep tracking even when the pointer outruns the strip).
+    fn render_sidebar_resize_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dragging = self.sidebar_resize.is_some();
+        div()
+            .id("sidebar-resize")
+            .w(px(5.))
+            .flex_shrink_0()
+            .h_full()
+            .cursor_col_resize()
+            .when(dragging, |s| {
+                s.bg(Hsla::from(theme::blue()).opacity(0.5))
+            })
+            .when(!dragging, |s| {
+                s.hover(|s| s.bg(Hsla::from(theme::blue()).opacity(0.35)))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.sidebar_resize = Some((event.position.x, this.sidebar_width));
+                    cx.notify();
+                }),
+            )
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         // Item counts are small: a plain scrollable div capped at ~40% of the
         // sidebar leaves the rest for the active item's file tree.
@@ -6982,7 +7039,7 @@ impl ReviewApp {
         };
 
         div()
-            .w(px(260.))
+            .w(self.sidebar_width)
             .flex_shrink_0()
             .h_full()
             .flex()
@@ -7732,6 +7789,33 @@ impl Render for ReviewApp {
             .flex_col()
             .bg(theme::base())
             .text_color(theme::text())
+            // Sidebar resize drag lives at the root so it keeps tracking even
+            // when the pointer runs off the thin handle onto the pane.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                let Some((start_x, start_w)) = this.sidebar_resize else {
+                    return;
+                };
+                if !event.dragging() {
+                    this.sidebar_resize = None;
+                    cx.notify();
+                    return;
+                }
+                let delta = f32::from(event.position.x) - f32::from(start_x);
+                let new = px((f32::from(start_w) + delta)
+                    .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH));
+                if new != this.sidebar_width {
+                    this.sidebar_width = new;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    if this.sidebar_resize.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 if this.palette.is_some() {
                     this.close_palette(window, cx);
@@ -7912,6 +7996,7 @@ impl Render for ReviewApp {
                     .flex()
                     .when(self.sidebar_visible, |main| {
                         main.child(self.render_sidebar(cx))
+                            .child(self.render_sidebar_resize_handle(cx))
                     })
                     .child(
                         div()

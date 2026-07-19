@@ -336,6 +336,77 @@ static CSS: Language = Language::new(|| {
     .ok()
 });
 
+static PHP: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_php::LANGUAGE_PHP.into(),
+        "php",
+        tree_sitter_php::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+static CSHARP: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_c_sharp::LANGUAGE.into(),
+        "c_sharp",
+        tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+static SWIFT: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_swift::LANGUAGE.into(),
+        "swift",
+        tree_sitter_swift::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+// tree-sitter-scss predates the LanguageFn convention: `language()` returns a
+// `Language` directly, so no `.into()` here.
+static SCSS: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_scss::language(),
+        "scss",
+        tree_sitter_scss::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
+// Block-only markdown: headings, fenced code, lists, blockquotes. Inline spans
+// (emphasis, code, links) live in a separate INLINE_LANGUAGE we don't inject,
+// so they render as plain text — same tradeoff as our other injection skips.
+static MARKDOWN: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_md::LANGUAGE.into(),
+        "markdown",
+        tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        "",
+        "",
+    )
+    .ok()
+});
+
+static SQL: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_sequel::LANGUAGE.into(),
+        "sql",
+        tree_sitter_sequel::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
 /// Resolve a language from a path's extension. `None` means "render plain".
 pub fn language_for_path(path: &str) -> Option<&'static Language> {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -360,6 +431,12 @@ pub fn language_for_path(path: &str) -> Option<&'static Language> {
         "yml" | "yaml" => &YAML,
         "html" | "htm" => &HTML,
         "css" => &CSS,
+        "php" | "phtml" => &PHP,
+        "cs" => &CSHARP,
+        "swift" => &SWIFT,
+        "scss" | "sass" => &SCSS,
+        "md" | "markdown" => &MARKDOWN,
+        "sql" => &SQL,
         _ => return None,
     };
     Some(lang)
@@ -460,6 +537,12 @@ mod tests {
             ("yaml", &YAML),
             ("html", &HTML),
             ("css", &CSS),
+            ("php", &PHP),
+            ("csharp", &CSHARP),
+            ("swift", &SWIFT),
+            ("scss", &SCSS),
+            ("markdown", &MARKDOWN),
+            ("sql", &SQL),
         ];
         for (name, lang) in all {
             assert!(lang.config().is_some(), "{name} config failed to build");
@@ -473,6 +556,11 @@ mod tests {
         assert!(language_for_path("lib/foo/bar.ex").is_some());
         assert!(language_for_path("mix.EXS").is_some()); // case-insensitive
         assert!(language_for_path("index.d.ts").is_some());
+        assert!(language_for_path("src/App.php").is_some());
+        assert!(language_for_path("styles/main.scss").is_some());
+        assert!(language_for_path("README.md").is_some());
+        assert!(language_for_path("Program.cs").is_some());
+        assert!(language_for_path("query.SQL").is_some()); // case-insensitive
         assert!(language_for_path("Makefile").is_none());
         assert!(language_for_path("logo.png").is_none());
         assert!(language_for_path(".gitignore").is_none());
@@ -525,6 +613,15 @@ mod tests {
         assert!(lines[0].iter().any(|&(_, t)| t == Token::Namespace));
         // :ok is an atom → string.special.symbol → Constant.
         assert!(lines[1].iter().any(|&(_, t)| t == Token::Constant));
+    }
+
+    #[test]
+    fn php_highlights() {
+        let php = language_for_path("x.php").unwrap();
+        let lines = highlight_lines(php, "<?php\nfunction greet($name) {\n  return \"hi\";\n}");
+        // `function` keyword on line 1, string literal on line 2.
+        assert!(lines[1].iter().any(|&(_, t)| t == Token::Keyword));
+        assert!(lines[2].iter().any(|&(_, t)| t == Token::String));
     }
 
     #[test]

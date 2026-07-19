@@ -35,7 +35,7 @@ xcrun: error: unable to find utility "metal", not a developer tool or in PATH
 
 ## Features
 - unified + split views
-- tree-sitter highlighting (18 languages),
+- tree-sitter highlighting (25 languages),
 - word-level intra-line diffs, 
 - multi-item sidebar with file tree
 - cmd-k palette with fuzzy PR picker, 
