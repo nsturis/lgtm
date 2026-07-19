@@ -2,8 +2,9 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone)]
 pub struct PrLocator {
@@ -347,6 +348,68 @@ pub fn submit_review(loc: &PrLocator, verdict: ReviewVerdict, body: &str) -> Res
     Ok(())
 }
 
+/// GitHub's create-review `event` value for each verdict.
+fn verdict_event(verdict: ReviewVerdict) -> &'static str {
+    match verdict {
+        ReviewVerdict::Approve => "APPROVE",
+        ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+        ReviewVerdict::Comment => "COMMENT",
+    }
+}
+
+/// One inline comment to attach to a batched review, anchored at (path, side,
+/// line) against the review's `commit_id`.
+#[derive(Debug, Clone)]
+pub struct DraftComment {
+    pub path: String,
+    pub line: u64,
+    /// "LEFT" or "RIGHT".
+    pub side: String,
+    pub body: String,
+}
+
+/// Builds the JSON body for `POST repos/{o}/{r}/pulls/{n}/reviews`. Pure, so
+/// event-mapping and comments-array shape are unit-testable without shelling
+/// out to `gh`.
+fn review_payload(
+    commit_oid: &str,
+    verdict: ReviewVerdict,
+    body: &str,
+    comments: &[DraftComment],
+) -> serde_json::Value {
+    serde_json::json!({
+        "commit_id": commit_oid,
+        "event": verdict_event(verdict),
+        "body": body,
+        "comments": comments.iter().map(|c| serde_json::json!({
+            "path": c.path, "line": c.line, "side": c.side, "body": c.body
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Create a review with inline comments in one call: `POST
+/// repos/{o}/{r}/pulls/{n}/reviews` with the comments attached, so the
+/// verdict and all pending drafts land in a single GitHub review instead of
+/// one network round-trip per comment.
+pub fn submit_review_with_comments(
+    loc: &PrLocator,
+    commit_oid: &str,
+    verdict: ReviewVerdict,
+    body: &str,
+    comments: &[DraftComment],
+) -> Result<()> {
+    let payload = review_payload(commit_oid, verdict, body, comments);
+    let endpoint = format!(
+        "repos/{}/{}/pulls/{}/reviews",
+        loc.owner, loc.repo, loc.number
+    );
+    gh_with_stdin(
+        &["api", "--method", "POST", &endpoint, "--input", "-"],
+        &serde_json::to_vec(&payload).context("failed to serialize review payload")?,
+    )?;
+    Ok(())
+}
+
 /// Reply to the review thread rooted at `comment_id`.
 pub fn post_reply(loc: &PrLocator, comment_id: u64, body: &str) -> Result<()> {
     gh(&[
@@ -484,6 +547,34 @@ fn gh(args: &[&str]) -> Result<String> {
         .args(args)
         .output()
         .map_err(|err| anyhow!("failed to run gh (is the GitHub CLI installed?): {err}"))?;
+    if !output.status.success() {
+        bail!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8(output.stdout).context("gh output was not UTF-8")
+}
+
+/// Like `gh`, but pipes `stdin` to the child process — for `gh api --input -`
+/// calls that take a JSON body too shaped (nested arrays/objects) for `-f`
+/// field flags.
+fn gh_with_stdin(args: &[&str], stdin: &[u8]) -> Result<String> {
+    let mut child = Command::new("gh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| anyhow!("failed to run gh (is the GitHub CLI installed?): {err}"))?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(stdin)
+        .context("failed to write gh stdin")?;
+    let output = child.wait_with_output().context("failed to run gh")?;
     if !output.status.success() {
         bail!(
             "gh {} failed: {}",
@@ -662,5 +753,46 @@ mod tests {
         assert_eq!(prs[0].head_ref_name, "field-name-terminator");
         assert_eq!(prs[0].updated_at, "2026-07-01T12:34:56Z");
         assert!(prs[1].is_draft);
+    }
+
+    #[test]
+    fn review_payload_maps_verdict_to_event() {
+        let payload = review_payload("abc123", ReviewVerdict::Approve, "lgtm", &[]);
+        assert_eq!(payload["commit_id"], "abc123");
+        assert_eq!(payload["event"], "APPROVE");
+        assert_eq!(payload["body"], "lgtm");
+        assert_eq!(payload["comments"], serde_json::json!([]));
+
+        let payload = review_payload("oid", ReviewVerdict::RequestChanges, "", &[]);
+        assert_eq!(payload["event"], "REQUEST_CHANGES");
+
+        let payload = review_payload("oid", ReviewVerdict::Comment, "", &[]);
+        assert_eq!(payload["event"], "COMMENT");
+    }
+
+    #[test]
+    fn review_payload_includes_comments_array() {
+        let comments = vec![
+            DraftComment {
+                path: "src/main.rs".to_string(),
+                line: 42,
+                side: "RIGHT".to_string(),
+                body: "nit: rename this".to_string(),
+            },
+            DraftComment {
+                path: "src/lib.rs".to_string(),
+                line: 7,
+                side: "LEFT".to_string(),
+                body: "was this intentional?".to_string(),
+            },
+        ];
+        let payload = review_payload("oid123", ReviewVerdict::Comment, "some notes", &comments);
+        assert_eq!(
+            payload["comments"],
+            serde_json::json!([
+                {"path": "src/main.rs", "line": 42, "side": "RIGHT", "body": "nit: rename this"},
+                {"path": "src/lib.rs", "line": 7, "side": "LEFT", "body": "was this intentional?"},
+            ])
+        );
     }
 }
