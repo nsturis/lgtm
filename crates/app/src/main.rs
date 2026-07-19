@@ -88,6 +88,7 @@ actions!(
         GoToDefinition,
         NavBack,
         NavForward,
+        CaptureScreenshot,
         GoToItem1,
         GoToItem2,
         GoToItem3,
@@ -99,6 +100,28 @@ actions!(
         GoToItem9
     ]
 );
+
+/// Capture LGTM's own window to `~/lgtm-shot.png` (overwritten each time) and
+/// return the path. macOS gates window capture behind Screen Recording, but
+/// LGTM is a real GUI app so the OS can grant it — the first call prompts.
+/// Picks the largest window owned by this process (the main diff window).
+fn capture_own_window() -> anyhow::Result<PathBuf> {
+    let pid = std::process::id();
+    let window = xcap::Window::all()?
+        .into_iter()
+        .filter(|w| w.pid().map(|p| p == pid).unwrap_or(false))
+        .max_by_key(|w| {
+            let (w1, h1) = (w.width().unwrap_or(0), w.height().unwrap_or(0));
+            w1 as u64 * h1 as u64
+        })
+        .ok_or_else(|| anyhow!("no window owned by this process"))?;
+    let image = window.capture_image()?;
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lgtm-shot.png");
+    image.save(&path)?;
+    Ok(path)
+}
 
 /// First PATH directory holding a regular file named `name` (a cheap `which`).
 fn which_on_path(name: &str) -> Option<PathBuf> {
@@ -204,6 +227,7 @@ fn main() {
                 KeyBinding::new("end", GoToBottom, Some("ReviewApp")),
                 KeyBinding::new("v", ToggleView, Some("ReviewApp")),
                 KeyBinding::new("m", ToggleMinimap, Some("ReviewApp")),
+                KeyBinding::new("cmd-shift-s", CaptureScreenshot, Some("ReviewApp")),
                 KeyBinding::new("c", ToggleComments, Some("ReviewApp")),
                 KeyBinding::new("r", Refresh, Some("ReviewApp")),
                 // Finish the review: approve / request changes / comment.
@@ -8277,6 +8301,10 @@ impl Render for ReviewApp {
             .on_action(cx.listener(|this, _: &ToggleMinimap, _, cx| {
                 this.minimap_visible = !this.minimap_visible;
                 cx.notify();
+            }))
+            .on_action(cx.listener(|_, _: &CaptureScreenshot, _, _| match capture_own_window() {
+                Ok(path) => eprintln!("lgtm: screenshot saved to {}", path.display()),
+                Err(err) => eprintln!("lgtm: screenshot failed: {err:#}"),
             }))
             .on_action(cx.listener(|this, _: &ToggleComments, _, cx| this.toggle_comments(cx)))
             .on_action(cx.listener(|this, _: &SubmitReview, window, cx| {
