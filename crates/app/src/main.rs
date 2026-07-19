@@ -82,6 +82,7 @@ actions!(
         CopySelection,
         FocusTreeFilter,
         ToggleMinimap,
+        ToggleWrap,
         ToggleComments,
         ToggleChat,
         SubmitReview,
@@ -227,6 +228,7 @@ fn main() {
                 KeyBinding::new("end", GoToBottom, Some("ReviewApp")),
                 KeyBinding::new("v", ToggleView, Some("ReviewApp")),
                 KeyBinding::new("m", ToggleMinimap, Some("ReviewApp")),
+                KeyBinding::new("w", ToggleWrap, Some("ReviewApp")),
                 KeyBinding::new("cmd-shift-s", CaptureScreenshot, Some("ReviewApp")),
                 KeyBinding::new("c", ToggleComments, Some("ReviewApp")),
                 KeyBinding::new("r", Refresh, Some("ReviewApp")),
@@ -318,6 +320,7 @@ enum ViewMode {
 
 /// One side of a split row: line number, kind, text, word-level highlights,
 /// and tree-sitter token spans.
+#[derive(Clone)]
 struct Cell {
     no: u32,
     kind: LineKind,
@@ -611,6 +614,85 @@ fn wrap_line_spans(
             }
         })
         .collect()
+}
+
+/// Wrap one split cell into visual segments. Continuation segments use line
+/// number 0 (a sentinel — real line numbers are 1-based) so the renderer blanks
+/// their gutter.
+fn wrap_cell(cell: &Cell, cols: usize) -> Vec<Cell> {
+    wrap_line_spans(&cell.text, &cell.intra, &cell.syntax, cols)
+        .into_iter()
+        .enumerate()
+        .map(|(i, seg)| Cell {
+            no: if i == 0 { cell.no } else { 0 },
+            kind: cell.kind,
+            text: seg.text.into(),
+            intra: seg.intra,
+            syntax: seg.syntax,
+        })
+        .collect()
+}
+
+/// Expand long code lines into fixed-height visual rows (soft-wrap), carrying
+/// spans onto each segment; non-code rows pass through. Rows stay a uniform
+/// height, so the minimap/scroll/hit-test math is unaffected. File- and
+/// hunk-header positions are recomputed because wrapping shifts row indices.
+fn wrap_rows(rows: Vec<Row>, cols: usize) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
+    let mut out: Vec<Row> = Vec::with_capacity(rows.len());
+    let mut file_rows = Vec::new();
+    let mut hunk_rows = Vec::new();
+    for row in rows {
+        match &row {
+            Row::FileHeader { .. } => file_rows.push(out.len()),
+            Row::HunkHeader { .. } => hunk_rows.push(out.len()),
+            _ => {}
+        }
+        match row {
+            Row::Line {
+                old_no,
+                new_no,
+                kind,
+                text,
+                intra,
+                syntax,
+            } if cols > 0 => {
+                let segs = wrap_line_spans(&text, &intra, &syntax, cols);
+                if segs.len() <= 1 {
+                    out.push(Row::Line { old_no, new_no, kind, text, intra, syntax });
+                } else {
+                    // Continuation rows carry no line numbers (both None), which
+                    // the renderer treats as "blank gutter, no marker".
+                    for (i, seg) in segs.into_iter().enumerate() {
+                        out.push(Row::Line {
+                            old_no: if i == 0 { old_no } else { None },
+                            new_no: if i == 0 { new_no } else { None },
+                            kind,
+                            text: seg.text.into(),
+                            intra: seg.intra,
+                            syntax: seg.syntax,
+                        });
+                    }
+                }
+            }
+            Row::SplitLine { left, right } if cols > 0 => {
+                let lw = left.map(|c| wrap_cell(&c, cols));
+                let rw = right.map(|c| wrap_cell(&c, cols));
+                let n = lw
+                    .as_ref()
+                    .map_or(0, Vec::len)
+                    .max(rw.as_ref().map_or(0, Vec::len))
+                    .max(1);
+                for i in 0..n {
+                    out.push(Row::SplitLine {
+                        left: lw.as_ref().and_then(|v| v.get(i).cloned()),
+                        right: rw.as_ref().and_then(|v| v.get(i).cloned()),
+                    });
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    (out, file_rows, hunk_rows)
 }
 
 /// Soft-wrap `text` at `width` chars: explicit newlines are preserved, wraps
@@ -1685,6 +1767,14 @@ fn render_row(
             syntax,
         } => {
             let (row_bg, word_bg, marker, marker_color) = kind_style(*kind);
+            // A soft-wrap continuation row carries no line numbers on either
+            // side; blank its marker too so the +/- isn't repeated down a
+            // wrapped line.
+            let marker = if old_no.is_none() && new_no.is_none() {
+                ""
+            } else {
+                marker
+            };
             let number = |no: Option<u32>| {
                 div()
                     .w(px(44.))
@@ -1742,6 +1832,15 @@ fn render_row(
                     return base.bg(theme::void_cell_bg());
                 };
                 let (row_bg, word_bg, marker, marker_color) = kind_style(cell.kind);
+                // no == 0 marks a soft-wrap continuation cell: blank line number
+                // and marker so they aren't repeated down a wrapped line.
+                let cont = cell.no == 0;
+                let no_text = if cont {
+                    String::new()
+                } else {
+                    cell.no.to_string()
+                };
+                let marker = if cont { "" } else { marker };
                 let mut side = base;
                 if let Some(bg) = row_bg {
                     side = side.bg(bg);
@@ -1753,7 +1852,7 @@ fn render_row(
                         .text_color(theme::overlay0())
                         .flex()
                         .justify_end()
-                        .child(SharedString::from(cell.no.to_string())),
+                        .child(SharedString::from(no_text)),
                 )
                 .child(
                     div()
@@ -2344,6 +2443,9 @@ struct ItemData {
     rows: Vec<Row>,
     file_rows: Vec<usize>,
     hunk_rows: Vec<usize>,
+    /// Soft-wrap width in characters for the current pane/mode; 0 = no wrap.
+    /// Set by the render pass from the pane width; consumed by `set_rows`.
+    wrap_cols: usize,
     /// Minimap model, index-aligned with `rows`; rebuilt with them.
     minimap: Vec<MinimapRow>,
     /// Coalesced minimap quad runs for one pane height, computed lazily on
@@ -2405,7 +2507,15 @@ struct ItemData {
 impl ItemData {
     /// Install freshly built display rows, keeping the minimap model in sync
     /// (every row rebuild goes through here).
-    fn set_rows(&mut self, (rows, file_rows, hunk_rows): (Vec<Row>, Vec<usize>, Vec<usize>)) {
+    fn set_rows(&mut self, built: (Vec<Row>, Vec<usize>, Vec<usize>)) {
+        // Soft-wrap is applied here, the single choke point for row updates, so
+        // every rebuild path (load, view toggle, comment toggle, gap expand)
+        // gets it. `wrap_cols == 0` means wrapping is off / width unknown.
+        let (rows, file_rows, hunk_rows) = if self.wrap_cols > 0 {
+            wrap_rows(built.0, self.wrap_cols)
+        } else {
+            built
+        };
         self.minimap = minimap_rows(&rows);
         self.minimap_cache.replace(None);
         self.rows = rows;
@@ -2603,6 +2713,7 @@ impl ReviewItem {
                     rows,
                     file_rows,
                     hunk_rows,
+                    wrap_cols: 0,
                     minimap,
                     minimap_cache: RefCell::new(None),
                     cursor: 0,
@@ -4114,6 +4225,8 @@ struct ReviewApp {
     drag_anchor: Option<(SelSide, RowCol)>,
     /// `m` toggles the minimap column for every item.
     minimap_visible: bool,
+    /// `w` toggles soft-wrap of long lines for every item (default on).
+    wrap_enabled: bool,
     /// `cmd-j` toggles the right-side chat panel (transcripts are per-item).
     chat_visible: bool,
     /// A minimap scrub drag is in progress (mouse went down on the minimap).
@@ -4234,6 +4347,7 @@ impl ReviewApp {
             palette_scroll: UniformListScrollHandle::new(),
             drag_anchor: None,
             minimap_visible: true,
+            wrap_enabled: true,
             chat_visible: false,
             minimap_scrub: false,
             char_width: None,
@@ -4279,6 +4393,39 @@ impl ReviewApp {
                 .em_advance(font_id, px(TEXT_SIZE))
                 .unwrap_or(px(TEXT_SIZE * 0.6))
         })
+    }
+
+    /// Keep the active item's soft-wrap width in sync with the pane. Derives the
+    /// character column count from the pane's painted width, the monospace cell
+    /// width, and the view mode, and rebuilds the rows only when it changes (or
+    /// when wrap is toggled off → 0). Called each render and on the `w` toggle.
+    fn apply_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let char_w = f32::from(self.char_width(window));
+        if char_w <= 0.0 {
+            return;
+        }
+        let enabled = self.wrap_enabled;
+        let Some(data) = self.active_data() else {
+            return;
+        };
+        let pane_w = f32::from(data.scroll.0.borrow().base_handle.bounds().size.width);
+        let mode = data.mode;
+        let target = if !enabled || pane_w <= 0.0 {
+            0
+        } else {
+            let content = match mode {
+                ViewMode::Unified => pane_w - UNIFIED_GUTTER,
+                ViewMode::Split => (pane_w - SPLIT_DIVIDER) / 2.0 - SPLIT_GUTTER,
+            };
+            (content / char_w).floor().max(0.0) as usize
+        };
+        if let Some(data) = self.active_data_mut() {
+            if data.wrap_cols != target {
+                data.wrap_cols = target;
+                data.rebuild_rows_anchored();
+                cx.notify();
+            }
+        }
     }
 
     /// Window position → (side, row/col) in the active diff. Row from the
@@ -8145,6 +8292,10 @@ impl ReviewApp {
 
 impl Render for ReviewApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Keep soft-wrap width in step with the pane before building the tree.
+        // Rebuilds only when the column count actually changes (resize, mode
+        // switch, first paint), so this is cheap on steady-state frames.
+        self.apply_wrap(window, cx);
         let entity = cx.entity();
         let pane: gpui::AnyElement = match self.active_item() {
             None => centered_message("⌘T to open a PR or path".into(), theme::overlay0()),
@@ -8370,6 +8521,13 @@ impl Render for ReviewApp {
             .on_action(cx.listener(|this, _: &ToggleView, _, cx| this.toggle_view(cx)))
             .on_action(cx.listener(|this, _: &ToggleMinimap, _, cx| {
                 this.minimap_visible = !this.minimap_visible;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWrap, window, cx| {
+                this.wrap_enabled = !this.wrap_enabled;
+                // Re-derive wrap width for the active item and rebuild now so
+                // the toggle is immediate (render also keeps it in sync).
+                this.apply_wrap(window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|_, _: &CaptureScreenshot, _, _| match capture_own_window() {
