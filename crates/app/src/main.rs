@@ -7104,9 +7104,14 @@ impl ReviewApp {
         }
     }
 
-    /// Submit the review via gh on the background executor. Success closes
-    /// the dialog and refetches the PR meta (so the titlebar's decision tag
-    /// updates); failure surfaces gh's stderr inline in the dialog.
+    /// Submit the review via gh on the background executor. With pending
+    /// drafts queued, batches them with the verdict in one
+    /// `gh::submit_review_with_comments` create-review call; with none, uses
+    /// the existing verdict-only `gh::submit_review`. Success closes the
+    /// dialog, clears any posted drafts, and refetches the PR meta (so the
+    /// titlebar's decision tag updates) and comments (so the posted drafts
+    /// reappear as real threads); failure surfaces gh's stderr inline in the
+    /// dialog and leaves the drafts queued — nothing is lost.
     fn submit_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(review) = &self.review else {
             return;
@@ -7133,16 +7138,60 @@ impl ReviewApp {
         };
         let loc = loc.clone();
         let item_id = item.id;
+        let ItemState::Ready(data) = &item.state else {
+            return;
+        };
+        let pending = data.pending_review.clone();
+        let head_oid = data
+            .pr_meta
+            .as_ref()
+            .map(|meta| meta.head_ref_oid.clone())
+            .unwrap_or_default();
+        // A draft's commit_id is the head oid at the time it was queued; if
+        // the PR moved since (a refresh picked up new commits), GitHub would
+        // anchor the batched comments against the wrong commit. Fail locally
+        // rather than post possibly-misplaced comments — the drafts stay
+        // queued either way.
+        if pending.iter().any(|draft| draft.commit_id != head_oid) {
+            if let Some(review) = &mut self.review {
+                review.error =
+                    Some("the PR has new commits since these drafts were queued — reload and re-add them".into());
+            }
+            cx.notify();
+            return;
+        }
         let gen = self.review_gen;
         if let Some(review) = &mut self.review {
             review.in_flight = true;
             review.error = None;
         }
         cx.notify();
+        let drafts: Vec<gh::DraftComment> = pending
+            .iter()
+            .map(|draft| gh::DraftComment {
+                path: draft.path.clone(),
+                line: draft.line,
+                side: draft.side.api_str().to_string(),
+                body: draft.body.clone(),
+            })
+            .collect();
+        let had_pending = !drafts.is_empty();
         cx.spawn_in(window, async move |this, cx| {
             let submit_loc = loc.clone();
             let result = cx
-                .background_spawn(async move { gh::submit_review(&submit_loc, verdict, &body) })
+                .background_spawn(async move {
+                    if drafts.is_empty() {
+                        gh::submit_review(&submit_loc, verdict, &body)
+                    } else {
+                        gh::submit_review_with_comments(
+                            &submit_loc,
+                            &head_oid,
+                            verdict,
+                            &body,
+                            &drafts,
+                        )
+                    }
+                })
                 .await;
             this.update_in(cx, |app, window, cx| {
                 if app.review_gen != gen {
@@ -7150,8 +7199,18 @@ impl ReviewApp {
                 }
                 match result {
                     Ok(()) => {
+                        if had_pending {
+                            if let Some(item) = app.items.iter_mut().find(|item| item.id == item_id)
+                            {
+                                if let ItemState::Ready(data) = &mut item.state {
+                                    data.pending_review.clear();
+                                    data.rebuild_rows_anchored();
+                                }
+                            }
+                        }
                         app.close_review(window, cx);
-                        app.refetch_meta(item_id, loc, cx);
+                        app.refetch_meta(item_id, loc.clone(), cx);
+                        app.refetch_comments(item_id, loc, cx);
                     }
                     Err(err) => {
                         if let Some(review) = &mut app.review {
