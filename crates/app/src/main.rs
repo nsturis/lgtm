@@ -3018,9 +3018,10 @@ impl ItemData {
     /// The CommentIndex row-building uses: `comments` (fetched/local) plus
     /// any of this item's `pending_review` drafts not yet posted, merged in
     /// as standalone threads so they render — with edit/delete affordances —
-    /// through the same comment-row machinery as posted comments. Returns
-    /// `comments` unchanged (no clone) when there's nothing pending — every
-    /// non-PR item, and any PR item before its first queued comment.
+    /// through the same comment-row machinery as posted comments. With nothing
+    /// pending (every non-PR item, and any PR item before its first queued
+    /// comment) it returns a clone of `comments` with no merge — cheap enough
+    /// for the user-action-triggered rebuilds that call it.
     fn comments_for_rows(&self) -> Option<CommentIndex> {
         if self.pending_review.is_empty() {
             return self.comments.clone();
@@ -6676,8 +6677,6 @@ impl ReviewApp {
 
     // Known god-module smell (many params), tracked under the ARCH refactor.
     #[allow(clippy::too_many_arguments)]
-    // Known god-module smell (many params), tracked under the ARCH refactor.
-    #[allow(clippy::too_many_arguments)]
     fn open_composer(
         &mut self,
         reply_to: Option<u64>,
@@ -9144,11 +9143,15 @@ impl ReviewApp {
             )
         };
         div()
-            .h(px(28.))
             .flex_shrink_0()
             .flex()
+            // Wrap to a second line rather than clip when the window is narrow —
+            // there are more chips now than fit on one line at small widths.
+            .flex_wrap()
             .items_center()
-            .gap_4()
+            .gap_x_4()
+            .gap_y_1()
+            .py(px(6.))
             .px_3()
             .bg(theme::mantle())
             .border_t_1()
@@ -9157,14 +9160,18 @@ impl ReviewApp {
             .child(hint(&["]", "["], "files"))
             .child(hint(&["n", "p"], "hunks"))
             .child(hint(&["v"], "unified/split"))
+            .child(hint(&["w"], "wrap"))
             .child(hint(&["m"], "minimap"))
             .child(hint(&["c"], "comments"))
+            .child(hint(&["shift-v"], "viewed"))
             .child(hint(&["/"], "filter files"))
             .child(hint(&["home", "end"], "top/bottom"))
             .child(hint(&["cmd-k"], "palette"))
             .child(hint(&["cmd-t"], "open"))
+            .child(hint(&["cmd-1"], "…9 tabs"))
             .child(hint(&["cmd-b"], "sidebar"))
             .child(hint(&["cmd-j"], "chat"))
+            .child(hint(&["cmd-shift-s"], "screenshot"))
             .child(hint(&["r"], "refresh"))
             .child(hint(&["cmd-enter"], "review"))
     }
