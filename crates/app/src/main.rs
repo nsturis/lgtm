@@ -543,6 +543,76 @@ impl LocalReview {
 /// Comment bodies soft-wrap at this many chars (the pane is monospace).
 const COMMENT_WRAP_CHARS: usize = 100;
 
+/// One visual segment of a soft-wrapped code line: its slice of the text plus
+/// the intra-line (word-diff) and syntax spans clipped to that slice and
+/// rebased to segment-relative byte offsets.
+#[derive(Debug, Clone, PartialEq)]
+struct WrapSegment {
+    text: String,
+    intra: Vec<Range<usize>>,
+    syntax: Vec<(Range<usize>, syntax::Token)>,
+}
+
+/// Soft-wrap a code line into segments of at most `cols` characters, carrying
+/// its intra and syntax spans onto each segment (clipped + rebased). `cols`
+/// counts characters (not bytes), so cuts land on UTF-8 boundaries and spans
+/// stay valid. `cols == 0`, or a line that already fits, yields a single
+/// segment equal to the input.
+fn wrap_line_spans(
+    text: &str,
+    intra: &[Range<usize>],
+    syntax: &[(Range<usize>, syntax::Token)],
+    cols: usize,
+) -> Vec<WrapSegment> {
+    if cols == 0 || text.chars().count() <= cols {
+        return vec![WrapSegment {
+            text: text.to_string(),
+            intra: intra.to_vec(),
+            syntax: syntax.to_vec(),
+        }];
+    }
+    // Byte offset of every `cols`-th character, plus the ends.
+    let mut bounds = vec![0usize];
+    for (i, (byte, _)) in text.char_indices().enumerate() {
+        if i > 0 && i % cols == 0 {
+            bounds.push(byte);
+        }
+    }
+    bounds.push(text.len());
+
+    let clip = |ranges: &[Range<usize>], lo: usize, hi: usize| -> Vec<Range<usize>> {
+        ranges
+            .iter()
+            .filter_map(|r| {
+                let (s, e) = (r.start.max(lo), r.end.min(hi));
+                (s < e).then(|| (s - lo)..(e - lo))
+            })
+            .collect()
+    };
+    let clip_syntax =
+        |spans: &[(Range<usize>, syntax::Token)], lo: usize, hi: usize| -> Vec<(Range<usize>, syntax::Token)> {
+            spans
+                .iter()
+                .filter_map(|(r, t)| {
+                    let (s, e) = (r.start.max(lo), r.end.min(hi));
+                    (s < e).then(|| ((s - lo)..(e - lo), *t))
+                })
+                .collect()
+        };
+
+    bounds
+        .windows(2)
+        .map(|w| {
+            let (lo, hi) = (w[0], w[1]);
+            WrapSegment {
+                text: text[lo..hi].to_string(),
+                intra: clip(intra, lo, hi),
+                syntax: clip_syntax(syntax, lo, hi),
+            }
+        })
+        .collect()
+}
+
 /// Soft-wrap `text` at `width` chars: explicit newlines are preserved, wraps
 /// prefer the last space in range (the space is consumed), and a word longer
 /// than the width hard-breaks on a char boundary.
@@ -8874,6 +8944,37 @@ mod tests {
     // build_rows in patch-only mode (no upgrades), must produce Line rows that
     // actually carry syntax spans. If this passes but the app looks unhighlighted,
     // the binary is stale — rebuild.
+    #[test]
+    fn wrap_line_spans_returns_single_segment_when_it_fits() {
+        let syntax = vec![(0..2, syntax::Token::Keyword)];
+        let segs = wrap_line_spans("fn x", &[1..3], &syntax, 10);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "fn x");
+        assert_eq!(segs[0].intra, vec![1..3]);
+        assert_eq!(segs[0].syntax, syntax);
+    }
+
+    #[test]
+    fn wrap_line_spans_splits_at_col_and_rebases_spans() {
+        // "abcdefgh" wrapped at 3 -> "abc","def","gh"
+        // syntax span 2..7 (spans all three segments) should clip+rebase to:
+        //   seg0 (bytes 0..3): 2..3 ; seg1 (3..6): 0..3 ; seg2 (6..8): 0..1
+        let segs = wrap_line_spans("abcdefgh", &[], &[(2..7, syntax::Token::String)], 3);
+        assert_eq!(segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["abc", "def", "gh"]);
+        assert_eq!(segs[0].syntax, vec![(2..3, syntax::Token::String)]);
+        assert_eq!(segs[1].syntax, vec![(0..3, syntax::Token::String)]);
+        assert_eq!(segs[2].syntax, vec![(0..1, syntax::Token::String)]);
+    }
+
+    #[test]
+    fn wrap_line_spans_cuts_on_utf8_boundaries() {
+        // each 'é' is 2 bytes; 4 chars wrapped at 2 -> "éé","éé", byte cuts at 0,4,8
+        let segs = wrap_line_spans("éééé", &[], &[], 2);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].text, "éé");
+        assert_eq!(segs[1].text, "éé");
+    }
+
     #[test]
     fn which_on_path_resolves_and_rejects() {
         // `sh` is always on a test runner's PATH; a bogus name never is.
