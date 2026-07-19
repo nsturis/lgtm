@@ -4374,6 +4374,7 @@ dependencies = [
  "brokk-bifrost",
  "claude",
  "diff-core",
+ "dirs 6.0.0",
  "fuzzy-matcher",
  "gh",
  "git",
@@ -4382,6 +4383,7 @@ dependencies = [
  "gpui-component-assets",
  "libc",
  "lsp-types",
+ "serde",
  "serde_json",
  "syntax",
 ]

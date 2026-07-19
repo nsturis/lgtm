@@ -1,4 +1,5 @@
 mod lsp_client;
+mod store;
 mod theme;
 
 use anyhow::{anyhow, bail, Context as _};
@@ -37,6 +38,7 @@ use lsp_client::{
     trace as lsp_trace, DefinitionTarget, HoverResult, LspBackend, LspPosition, LspProgress,
     LspSession,
 };
+use store::Store;
 
 const MONO: &str = "Menlo";
 const ROW_HEIGHT: f32 = 22.0;
