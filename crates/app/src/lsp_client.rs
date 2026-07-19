@@ -288,13 +288,10 @@ impl LspClient {
             (LspBackend::RustAnalyzer, _) => {
                 let deadline = std::time::Instant::now() + RA_WARMUP_DEADLINE;
                 while !self.ra_quiescent && std::time::Instant::now() < deadline {
-                    match self.read_message_timeout(Duration::from_millis(500)) {
-                        Ok(msg) => {
-                            self.handle_server_message(&msg)?;
-                        }
-                        // No message this tick (or a read hiccup): loop and
-                        // re-check `ra_quiescent`/deadline.
-                        Err(_) => {}
+                    // No message this tick (or a read hiccup): loop and
+                    // re-check `ra_quiescent`/deadline.
+                    if let Ok(msg) = self.read_message_timeout(Duration::from_millis(500)) {
+                        self.handle_server_message(&msg)?;
                     }
                 }
             }
@@ -756,10 +753,7 @@ impl Drop for LspClient {
     }
 }
 
-fn server_command(
-    backend: LspBackend,
-    root: &Path,
-) -> Result<(PathBuf, Vec<std::ffi::OsString>)> {
+fn server_command(backend: LspBackend, root: &Path) -> Result<(PathBuf, Vec<std::ffi::OsString>)> {
     match backend {
         LspBackend::Bifrost => {
             if let Some(bin) = std::env::var_os("LGTM_BIFROST") {

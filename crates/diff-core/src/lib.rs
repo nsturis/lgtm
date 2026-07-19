@@ -497,6 +497,10 @@ fn word_diff(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
 }
 
 #[cfg(test)]
+// Test fixtures intentionally build single-element `Vec<Range<_>>` literals
+// (one intra-line highlight span); clippy's alternatives change the meaning,
+// so this is allowed rather than "fixed".
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 

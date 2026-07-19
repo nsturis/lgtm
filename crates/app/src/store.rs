@@ -76,10 +76,6 @@ impl Store {
         }
     }
 
-    pub fn is_pinned_repo(&self, slug: &str) -> bool {
-        self.pinned_repos.iter().any(|r| r == slug)
-    }
-
     /// Add or remove `slug` from pinned repos.
     pub fn toggle_pinned_repo(&mut self, slug: &str) {
         if let Some(pos) = self.pinned_repos.iter().position(|r| r == slug) {
@@ -112,10 +108,6 @@ impl Store {
         self.recent_prs.truncate(RECENT_PR_CAP);
     }
 
-    pub fn is_pinned_pr(&self, slug: &str, number: u64) -> bool {
-        self.pinned_prs.get(slug).is_some_and(|v| v.contains(&number))
-    }
-
     pub fn pinned_prs_for(&self, slug: &str) -> &[u64] {
         self.pinned_prs.get(slug).map(Vec::as_slice).unwrap_or(&[])
     }
@@ -144,7 +136,8 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lgtm-store-test-{}-{}", std::process::id(), name));
+        let dir =
+            std::env::temp_dir().join(format!("lgtm-store-test-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("state.json")
     }
@@ -193,13 +186,16 @@ mod tests {
         }
         assert_eq!(s.recent_prs.len(), RECENT_PR_CAP);
         assert_eq!(s.recent_prs[0].number, 11); // newest first
-        // Reopening an existing PR moves it to front with a refreshed title,
-        // without duplicating.
+                                                // Reopening an existing PR moves it to front with a refreshed title,
+                                                // without duplicating.
         s.note_recent_pr("o/r", 5, "PR 5 (updated)");
         assert_eq!(s.recent_prs[0].number, 5);
         assert_eq!(s.recent_prs[0].title, "PR 5 (updated)");
         assert_eq!(
-            s.recent_prs.iter().filter(|p| p.number == 5 && p.slug == "o/r").count(),
+            s.recent_prs
+                .iter()
+                .filter(|p| p.number == 5 && p.slug == "o/r")
+                .count(),
             1
         );
         // Same number in a different repo is a distinct entry.
@@ -211,15 +207,14 @@ mod tests {
     fn toggle_repo_and_pr_are_reversible() {
         let mut s = Store::default();
         s.toggle_pinned_repo("a/b");
-        assert!(s.is_pinned_repo("a/b"));
+        assert!(s.pinned_repos.contains(&"a/b".to_string()));
         s.toggle_pinned_repo("a/b");
-        assert!(!s.is_pinned_repo("a/b"));
+        assert!(!s.pinned_repos.contains(&"a/b".to_string()));
 
         s.toggle_pinned_pr("a/b", 7);
-        assert!(s.is_pinned_pr("a/b", 7));
         assert_eq!(s.pinned_prs_for("a/b"), &[7]);
         s.toggle_pinned_pr("a/b", 7);
-        assert!(!s.is_pinned_pr("a/b", 7));
-        assert!(s.pinned_prs.get("a/b").is_none()); // empty entry dropped
+        assert!(s.pinned_prs_for("a/b").is_empty());
+        assert!(!s.pinned_prs.contains_key("a/b")); // empty entry dropped
     }
 }

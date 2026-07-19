@@ -7,12 +7,11 @@ use diff_core::{diff_texts, DiffRow, FileDiff, FileStatus, Hunk, PrDiff};
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use gpui::{
     actions, anchored, canvas, deferred, div, fill, font, point, prelude::*, px, relative, size,
-    uniform_list, App,
-    Application, Bounds, ClipboardItem, Context, FocusHandle, HighlightStyle, Hsla, KeyBinding,
-    Keystroke, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollStrategy, ScrollWheelEvent,
-    SharedString, StyledText, Subscription, Task, TextRun, TitlebarOptions, UniformListScrollHandle,
-    Window, WindowBounds, WindowOptions,
+    uniform_list, App, Application, Bounds, ClipboardItem, Context, FocusHandle, HighlightStyle,
+    Hsla, KeyBinding, Keystroke, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, ScrollStrategy,
+    ScrollWheelEvent, SharedString, StyledText, Subscription, Task, TextRun, TitlebarOptions,
+    UniformListScrollHandle, Window, WindowBounds, WindowOptions,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -633,16 +632,18 @@ fn wrap_line_spans(
             })
             .collect()
     };
-    let clip_syntax =
-        |spans: &[(Range<usize>, syntax::Token)], lo: usize, hi: usize| -> Vec<(Range<usize>, syntax::Token)> {
-            spans
-                .iter()
-                .filter_map(|(r, t)| {
-                    let (s, e) = (r.start.max(lo), r.end.min(hi));
-                    (s < e).then(|| ((s - lo)..(e - lo), *t))
-                })
-                .collect()
-        };
+    let clip_syntax = |spans: &[(Range<usize>, syntax::Token)],
+                       lo: usize,
+                       hi: usize|
+     -> Vec<(Range<usize>, syntax::Token)> {
+        spans
+            .iter()
+            .filter_map(|(r, t)| {
+                let (s, e) = (r.start.max(lo), r.end.min(hi));
+                (s < e).then(|| ((s - lo)..(e - lo), *t))
+            })
+            .collect()
+    };
 
     bounds
         .windows(2)
@@ -699,7 +700,14 @@ fn wrap_rows(rows: Vec<Row>, cols: usize) -> (Vec<Row>, Vec<usize>, Vec<usize>) 
             } if cols > 0 => {
                 let segs = wrap_line_spans(&text, &intra, &syntax, cols);
                 if segs.len() <= 1 {
-                    out.push(Row::Line { old_no, new_no, kind, text, intra, syntax });
+                    out.push(Row::Line {
+                        old_no,
+                        new_no,
+                        kind,
+                        text,
+                        intra,
+                        syntax,
+                    });
                 } else {
                     // Continuation rows carry no line numbers (both None), which
                     // the renderer treats as "blank gutter, no marker".
@@ -948,10 +956,15 @@ fn selection_text(sel: &Selection, rows: &[Row]) -> String {
     let (start, end) = sel.ordered();
     let mut out = String::new();
     let mut wrote_any = false;
-    for ix in start.row..=end.row.min(rows.len().saturating_sub(1)) {
-        if let Some(range) = row_selection_range(sel, ix, &rows[ix]) {
-            let text = row_side_text(&rows[ix], sel.side).unwrap_or_default();
-            if wrote_any && !is_continuation_row(&rows[ix]) {
+    for (ix, row) in rows
+        .iter()
+        .enumerate()
+        .take(end.row.min(rows.len().saturating_sub(1)) + 1)
+        .skip(start.row)
+    {
+        if let Some(range) = row_selection_range(sel, ix, row) {
+            let text = row_side_text(row, sel.side).unwrap_or_default();
+            if wrote_any && !is_continuation_row(row) {
                 out.push('\n');
             }
             out.push_str(&text[range]);
@@ -1106,6 +1119,8 @@ fn gap_span(hunks: &[Hunk], gap_ix: usize, total_new: u32) -> (u32, u32, u32) {
 /// Emit gap `gap_ix` of an upgraded file into `rows`: nothing when no lines
 /// are hidden there, synthesized full-context rows when expanded, otherwise
 /// one clickable Gap row.
+// Known god-module smell (many params), tracked under the ARCH refactor.
+#[allow(clippy::too_many_arguments)]
 fn push_gap_rows(
     rows: &mut Vec<Row>,
     upgrade: &FileUpgrade,
@@ -2178,9 +2193,7 @@ fn minimap_runs(rows: &[MinimapRow], pane_px: f32) -> MinimapLayout {
         for row in chunk {
             let mut fold = |lane: MinimapLane, color: MinimapColor, f: f32| {
                 let ix = lane as usize;
-                if winner[ix].map_or(true, |best| {
-                    minimap_priority(color) > minimap_priority(best)
-                }) {
+                if winner[ix].is_none_or(|best| minimap_priority(color) > minimap_priority(best)) {
                     winner[ix] = Some(color);
                 }
                 frac[ix] = frac[ix].max(f);
@@ -2846,8 +2859,8 @@ impl ReviewItem {
             }
             _ => {
                 let minimap = minimap_rows(&rows);
-                let local_review = matches!(&self.source, Source::Local(_))
-                    .then(LocalReview::default);
+                let local_review =
+                    matches!(&self.source, Source::Local(_)).then(LocalReview::default);
                 let comments = match &local_review {
                     Some(local) => Some(local.index()),
                     None => comments,
@@ -3315,7 +3328,10 @@ fn local_titlebar_content(
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_local_base_palette(item_id, repo_root.clone(), window, cx);
                         }))
-                        .child(SharedString::from(format!("{} ← {}", src.base_label, src.branch))),
+                        .child(SharedString::from(format!(
+                            "{} ← {}",
+                            src.base_label, src.branch
+                        ))),
                 )
                 .child(
                     div()
@@ -3344,10 +3360,6 @@ fn local_titlebar_content(
 enum PaletteStep {
     /// Step 0 (cmd-k entry): pinned + recent repos, or type a new owner/repo.
     RepoHome { selected: usize },
-    /// Step 1: pick what to open.
-    Sources { selected: usize },
-    /// Step 2 (GitHub path): type `owner/repo`.
-    RepoInput { error: Option<SharedString> },
     /// Step 3 (GitHub path): pick a PR from the repo's open list.
     PrList { repo: String, prs: PrListState },
     /// Local path: pick the base ref for an already-open local item.
@@ -3383,22 +3395,7 @@ enum BaseListState {
     Failed(String),
 }
 
-const PALETTE_SOURCES: [&str; 2] = ["Open GitHub pull request", "Open local folder"];
-const SOURCE_PR: usize = 0;
-const SOURCE_FOLDER: usize = 1;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
-
-/// Step-1 options matching the query (case-insensitive substring), as indices
-/// into PALETTE_SOURCES. Empty query keeps both.
-fn filtered_sources(query: &str) -> Vec<usize> {
-    let q = query.trim().to_lowercase();
-    PALETTE_SOURCES
-        .iter()
-        .enumerate()
-        .filter(|(_, label)| q.is_empty() || label.to_lowercase().contains(&q))
-        .map(|(ix, _)| ix)
-        .collect()
-}
 
 /// Fuzzy-filter PRs against `#number title author branch`, best score first;
 /// an empty query keeps gh's original (most recently updated) order.
@@ -3445,7 +3442,11 @@ fn filter_base_refs(all: &[String], query: &str) -> Vec<usize> {
 enum HomeRow {
     /// A recently-opened PR — clicking reopens it directly (no repo → list →
     /// pick chain, no network fetch).
-    Pr { slug: String, number: u64, title: String },
+    Pr {
+        slug: String,
+        number: u64,
+        title: String,
+    },
     /// A repo "owner/repo"; `pinned` marks favourites.
     Repo { slug: String, pinned: bool },
     /// The "open local folder" affordance, always last.
@@ -3477,7 +3478,10 @@ fn home_rows(
     }
     for slug in pinned {
         if matches(slug) {
-            rows.push(HomeRow::Repo { slug: slug.clone(), pinned: true });
+            rows.push(HomeRow::Repo {
+                slug: slug.clone(),
+                pinned: true,
+            });
         }
     }
     for slug in recent {
@@ -3485,7 +3489,10 @@ fn home_rows(
             continue;
         }
         if matches(slug) {
-            rows.push(HomeRow::Repo { slug: slug.clone(), pinned: false });
+            rows.push(HomeRow::Repo {
+                slug: slug.clone(),
+                pinned: false,
+            });
         }
     }
     if q.is_empty() || "open local folder".contains(&q) {
@@ -3561,8 +3568,16 @@ fn palette_pr_row(
                 .flex_shrink_0()
                 .px_1()
                 .cursor_pointer()
-                .text_color(if pinned { theme::peach() } else { theme::overlay0() })
-                .child(SharedString::from(if pinned { "\u{2605}" } else { "\u{2606}" }))
+                .text_color(if pinned {
+                    theme::peach()
+                } else {
+                    theme::overlay0()
+                })
+                .child(SharedString::from(if pinned {
+                    "\u{2605}"
+                } else {
+                    "\u{2606}"
+                }))
                 .on_click(move |_, _window, cx| {
                     cx.stop_propagation();
                     entity.update(cx, |this, cx| this.palette_toggle_pin_pr(number, cx));
@@ -4038,11 +4053,16 @@ fn selection_info(
     let file_ix = file_rows.iter().rposition(|&ix| ix <= start.row)?;
     let path = diff.files.get(file_ix)?.display_path().to_string();
     let (mut lo, mut hi) = (u32::MAX, 0);
-    for ix in start.row..=end.row.min(rows.len().saturating_sub(1)) {
-        if row_selection_range(sel, ix, &rows[ix]).is_none() {
+    for (ix, row) in rows
+        .iter()
+        .enumerate()
+        .take(end.row.min(rows.len().saturating_sub(1)) + 1)
+        .skip(start.row)
+    {
+        if row_selection_range(sel, ix, row).is_none() {
             continue;
         }
-        let no = match (&rows[ix], sel.side) {
+        let no = match (row, sel.side) {
             (Row::Line { old_no, new_no, .. }, _) => new_no.or(*old_no),
             // no == 0 is the continuation sentinel; it must not drag `lo` to 0.
             (Row::SplitLine { left, .. }, SelSide::Left) => {
@@ -4693,8 +4713,7 @@ impl ReviewApp {
                             // Feed the cmd-k home's "recent PRs" list, now that
                             // the title is known — one-click reopen later.
                             if let (Source::Pr(loc), Some(meta)) = (&item.source, &data.pr_meta) {
-                                recent_pr =
-                                    Some((loc.repo_slug(), loc.number, meta.title.clone()));
+                                recent_pr = Some((loc.repo_slug(), loc.number, meta.title.clone()));
                             }
                             let jobs: Vec<UpgradeJob> = data
                                 .diff
@@ -5054,7 +5073,12 @@ impl ReviewApp {
         }
         self.palette = Some(PaletteStep::RepoHome { selected: 0 });
         self.palette_gen += 1;
-        self.set_palette_input("", "owner/repo to open its pull requests, or filter…", window, cx);
+        self.set_palette_input(
+            "",
+            "owner/repo to open its pull requests, or filter…",
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -5069,18 +5093,16 @@ impl ReviewApp {
     fn palette_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.palette {
             None | Some(PaletteStep::RepoHome { .. }) => self.close_palette(window, cx),
-            Some(PaletteStep::Sources { .. }) => self.close_palette(window, cx),
-            Some(PaletteStep::RepoInput { .. }) => {
-                self.palette = Some(PaletteStep::RepoHome { selected: 0 });
-                self.palette_gen += 1;
-                self.set_palette_input("", "owner/repo to open its pull requests, or filter…", window, cx);
-                cx.notify();
-            }
             Some(PaletteStep::PrList { repo, .. }) => {
                 let repo = repo.clone();
                 self.palette = Some(PaletteStep::RepoHome { selected: 0 });
                 self.palette_gen += 1;
-                self.set_palette_input(&repo, "owner/repo to open its pull requests, or filter…", window, cx);
+                self.set_palette_input(
+                    &repo,
+                    "owner/repo to open its pull requests, or filter…",
+                    window,
+                    cx,
+                );
                 cx.notify();
             }
             Some(PaletteStep::LocalBaseList { .. }) => self.close_palette(window, cx),
@@ -5091,13 +5113,13 @@ impl ReviewApp {
         let query = self.palette_input.read(cx).value().to_string();
         match &mut self.palette {
             Some(PaletteStep::RepoHome { selected }) => {
-                let len = home_rows(&self.store.recent_prs, &self.store.pinned_repos, &self.store.recent_repos, &query).len();
-                if len > 0 {
-                    *selected = (*selected as isize + delta).clamp(0, len as isize - 1) as usize;
-                }
-            }
-            Some(PaletteStep::Sources { selected }) => {
-                let len = filtered_sources(&query).len();
+                let len = home_rows(
+                    &self.store.recent_prs,
+                    &self.store.pinned_repos,
+                    &self.store.recent_repos,
+                    &query,
+                )
+                .len();
                 if len > 0 {
                     *selected = (*selected as isize + delta).clamp(0, len as isize - 1) as usize;
                 }
@@ -5117,7 +5139,10 @@ impl ReviewApp {
                 }
             }
             Some(PaletteStep::LocalBaseList {
-                bases: BaseListState::Loaded { filtered, selected, .. },
+                bases:
+                    BaseListState::Loaded {
+                        filtered, selected, ..
+                    },
                 ..
             }) => {
                 if !filtered.is_empty() {
@@ -5141,14 +5166,15 @@ impl ReviewApp {
             .unwrap_or_default();
         match &mut self.palette {
             Some(PaletteStep::RepoHome { selected }) => {
-                let len = home_rows(&self.store.recent_prs, &self.store.pinned_repos, &self.store.recent_repos, &query).len();
+                let len = home_rows(
+                    &self.store.recent_prs,
+                    &self.store.pinned_repos,
+                    &self.store.recent_repos,
+                    &query,
+                )
+                .len();
                 *selected = (*selected).min(len.saturating_sub(1));
             }
-            Some(PaletteStep::Sources { selected }) => {
-                let len = filtered_sources(&query).len();
-                *selected = (*selected).min(len.saturating_sub(1));
-            }
-            Some(PaletteStep::RepoInput { error }) => *error = None,
             Some(PaletteStep::PrList {
                 prs:
                     PrListState::Loaded {
@@ -5163,7 +5189,12 @@ impl ReviewApp {
                 self.palette_scroll.scroll_to_item(0, ScrollStrategy::Top);
             }
             Some(PaletteStep::LocalBaseList {
-                bases: BaseListState::Loaded { all, filtered, selected },
+                bases:
+                    BaseListState::Loaded {
+                        all,
+                        filtered,
+                        selected,
+                    },
                 ..
             }) => {
                 *filtered = filter_base_refs(all, &query);
@@ -5177,23 +5208,8 @@ impl ReviewApp {
 
     /// Enter, on whichever step is showing.
     fn palette_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.palette_input.read(cx).value().trim().to_string();
         match &self.palette {
             Some(PaletteStep::RepoHome { .. }) => self.palette_home_confirm(window, cx),
-            Some(PaletteStep::Sources { selected }) => {
-                if let Some(&opt) = filtered_sources(&query).get(*selected) {
-                    self.palette_activate_source(opt, window, cx);
-                }
-            }
-            Some(PaletteStep::RepoInput { .. }) => match parse_repo_slug(&query) {
-                Ok((owner, repo)) => self.palette_fetch_prs(owner, repo, window, cx),
-                Err(msg) => {
-                    if let Some(PaletteStep::RepoInput { error }) = &mut self.palette {
-                        *error = Some(msg.into());
-                        cx.notify();
-                    }
-                }
-            },
             Some(PaletteStep::PrList {
                 prs: PrListState::Loaded { selected, .. },
                 ..
@@ -5224,7 +5240,12 @@ impl ReviewApp {
             return;
         };
         let selected = *selected;
-        let rows = home_rows(&self.store.recent_prs, &self.store.pinned_repos, &self.store.recent_repos, &query);
+        let rows = home_rows(
+            &self.store.recent_prs,
+            &self.store.pinned_repos,
+            &self.store.recent_repos,
+            &query,
+        );
         match rows.into_iter().nth(selected) {
             Some(HomeRow::Pr { slug, number, .. }) => {
                 self.palette_open_recent_pr(&slug, number, window, cx)
@@ -5287,7 +5308,12 @@ impl ReviewApp {
         let query = self.palette_input.read(cx).value().to_string();
         let pinned = self.store.pinned_prs_for(&repo).to_vec();
         if let Some(PaletteStep::PrList {
-            prs: PrListState::Loaded { all, filtered, selected },
+            prs:
+                PrListState::Loaded {
+                    all,
+                    filtered,
+                    selected,
+                },
             ..
         }) = &mut self.palette
         {
@@ -5295,23 +5321,6 @@ impl ReviewApp {
             *selected = 0;
         }
         cx.notify();
-    }
-
-    fn palette_activate_source(&mut self, opt: usize, window: &mut Window, cx: &mut Context<Self>) {
-        match opt {
-            SOURCE_PR => {
-                self.palette = Some(PaletteStep::RepoInput { error: None });
-                self.palette_gen += 1;
-                self.set_palette_input("", "owner/repo", window, cx);
-                cx.notify();
-            }
-            SOURCE_FOLDER => {
-                // The palette closes when the native dialog opens.
-                self.close_palette(window, cx);
-                self.prompt_open_folder(cx);
-            }
-            _ => {}
-        }
     }
 
     /// Step 2 → step 3: show "loading…" and fetch the open-PR list on the
@@ -5754,14 +5763,13 @@ impl ReviewApp {
         };
         // New comments post against the head oid; without one (older gh
         // missing headRefOid) the affordance stays off entirely.
-        if matches!(&item.source, Source::Pr(_)) {
-            if data
+        if matches!(&item.source, Source::Pr(_))
+            && data
                 .pr_meta
                 .as_ref()
                 .is_none_or(|meta| meta.head_ref_oid.is_empty())
-            {
-                return None;
-            }
+        {
+            return None;
         }
         let bounds = data.scroll.0.borrow().base_handle.bounds();
         if !bounds.contains(&position) {
@@ -6049,10 +6057,7 @@ impl ReviewApp {
     fn read_lsp_source_lines(
         &self,
         target: &DefinitionTarget,
-    ) -> anyhow::Result<(
-        Vec<SharedString>,
-        Vec<Vec<(Range<usize>, syntax::Token)>>,
-    )> {
+    ) -> anyhow::Result<(Vec<SharedString>, Vec<Vec<(Range<usize>, syntax::Token)>>)> {
         let data = self.active_data().context("no active item")?;
         let handle = data.lsp.as_ref().context("LSP is not ready")?;
         // Targets outside the workspace (dependency / stdlib sources) carry an
@@ -6136,6 +6141,8 @@ impl ReviewApp {
         }
     }
 
+    // Known god-module smell (many params), tracked under the ARCH refactor.
+    #[allow(clippy::too_many_arguments)]
     fn open_composer(
         &mut self,
         reply_to: Option<u64>,
@@ -6188,7 +6195,8 @@ impl ReviewApp {
                 let mentions = data.mentions.clone();
                 seed_mentions(&mentions, data);
                 input.update(cx, |state, _| {
-                    state.lsp.completion_provider = Some(Rc::new(MentionProvider { users: mentions }));
+                    state.lsp.completion_provider =
+                        Some(Rc::new(MentionProvider { users: mentions }));
                 });
             }
             self.ensure_mentions(item_id, loc, cx);
@@ -6344,6 +6352,8 @@ impl ReviewApp {
         .detach();
     }
 
+    // Known god-module smell (many params), tracked under the ARCH refactor.
+    #[allow(clippy::too_many_arguments)]
     fn add_local_comment(
         &mut self,
         item_id: u64,
@@ -7104,14 +7114,13 @@ impl ReviewApp {
         let ItemState::Ready(data) = &item.state else {
             return None;
         };
-        if matches!(&item.source, Source::Pr(_)) {
-            if data
+        if matches!(&item.source, Source::Pr(_))
+            && data
                 .pr_meta
                 .as_ref()
                 .is_none_or(|meta| meta.head_ref_oid.is_empty())
-            {
-                return None;
-            }
+        {
+            return None;
         }
         let (anchor_side, line) = comment_anchor(&data.rows, row_ix, side)?;
         let file_ix = data
@@ -7565,9 +7574,7 @@ impl ReviewApp {
             .flex_shrink_0()
             .h_full()
             .cursor_col_resize()
-            .when(dragging, |s| {
-                s.bg(Hsla::from(theme::blue()).opacity(0.5))
-            })
+            .when(dragging, |s| s.bg(Hsla::from(theme::blue()).opacity(0.5)))
             .when(!dragging, |s| {
                 s.hover(|s| s.bg(Hsla::from(theme::blue()).opacity(0.35)))
             })
@@ -7824,8 +7831,6 @@ impl ReviewApp {
 
         let header: Option<SharedString> = match step {
             PaletteStep::RepoHome { .. } => None,
-            PaletteStep::Sources { .. } => None,
-            PaletteStep::RepoInput { .. } => Some("Open GitHub pull request".into()),
             PaletteStep::PrList { repo, .. } => Some(repo.clone().into()),
             PaletteStep::LocalBaseList { .. } => Some("Choose local diff base".into()),
         };
@@ -7833,7 +7838,12 @@ impl ReviewApp {
         let body: gpui::AnyElement = match step {
             PaletteStep::RepoHome { selected } => {
                 let selected = *selected;
-                let rows = home_rows(&self.store.recent_prs, &self.store.pinned_repos, &self.store.recent_repos, &query);
+                let rows = home_rows(
+                    &self.store.recent_prs,
+                    &self.store.pinned_repos,
+                    &self.store.recent_repos,
+                    &query,
+                );
                 let mut list = div().py_1().flex().flex_col();
                 // The primary action of this screen is "type owner/repo to open
                 // a GitHub PR". Without a visible cue, a first-run user (no pins
@@ -7850,131 +7860,116 @@ impl ReviewApp {
                         )),
                 );
                 if rows.is_empty() {
-                    list = list.child(
-                        div().px_3().py_2().text_color(theme::overlay0())
-                            .child(SharedString::from("no matches — type owner/repo and press enter")),
-                    );
+                    list = list.child(div().px_3().py_2().text_color(theme::overlay0()).child(
+                        SharedString::from("no matches — type owner/repo and press enter"),
+                    ));
                 }
                 for (pos, row) in rows.into_iter().enumerate() {
                     let is_sel = pos == selected;
                     let base = div()
                         .id(("palette-home", pos))
-                        .mx_1().px_2().h(px(PALETTE_ROW_HEIGHT)).rounded_md()
-                        .flex().items_center().gap_2().cursor_pointer()
+                        .mx_1()
+                        .px_2()
+                        .h(px(PALETTE_ROW_HEIGHT))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
                         .when(is_sel, |r| r.bg(theme::surface0()))
-                        .when(!is_sel, |r| r.hover(|s| s.bg(Hsla::from(theme::surface0()).opacity(0.5))));
+                        .when(!is_sel, |r| {
+                            r.hover(|s| s.bg(Hsla::from(theme::surface0()).opacity(0.5)))
+                        });
                     let child = match row {
-                        HomeRow::Pr { slug, number, title } => {
+                        HomeRow::Pr {
+                            slug,
+                            number,
+                            title,
+                        } => {
                             let (s, n) = (slug.clone(), number);
-                            base
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.palette_open_recent_pr(&s, n, window, cx)
-                                }))
-                                .child(
-                                    div()
-                                        .w(px(8.)).h(px(8.)).flex_shrink_0()
-                                        .rounded_full().bg(theme::green()),
-                                )
-                                .child(
-                                    div().flex_shrink_0().text_color(theme::subtext())
-                                        .child(SharedString::from(format!("{slug}#{number}"))),
-                                )
-                                .child(
-                                    div().flex_1().min_w_0().truncate().text_color(theme::text())
-                                        .child(SharedString::from(title)),
-                                )
+                            base.on_click(cx.listener(move |this, _, window, cx| {
+                                this.palette_open_recent_pr(&s, n, window, cx)
+                            }))
+                            .child(
+                                div()
+                                    .w(px(8.))
+                                    .h(px(8.))
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .bg(theme::green()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(theme::subtext())
+                                    .child(SharedString::from(format!("{slug}#{number}"))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme::text())
+                                    .child(SharedString::from(title)),
+                            )
                         }
                         HomeRow::Repo { slug, pinned } => {
                             let slug_for_row = slug.clone();
                             let slug_for_star = slug.clone();
-                            base
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.palette_home_activate(&slug_for_row, window, cx)
-                                }))
-                                .child(
-                                    div()
-                                        .id(("palette-home-star", pos))
-                                        .flex_shrink_0().px_1().cursor_pointer()
-                                        .text_color(if pinned { theme::peach() } else { theme::overlay0() })
-                                        .child(SharedString::from(if pinned { "\u{2605}" } else { "\u{2606}" }))
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.palette_toggle_pin_repo(&slug_for_star, cx);
-                                        })),
-                                )
-                                .child(div().flex_1().min_w_0().truncate().text_color(theme::text())
-                                    .child(SharedString::from(slug)))
+                            base.on_click(cx.listener(move |this, _, window, cx| {
+                                this.palette_home_activate(&slug_for_row, window, cx)
+                            }))
+                            .child(
+                                div()
+                                    .id(("palette-home-star", pos))
+                                    .flex_shrink_0()
+                                    .px_1()
+                                    .cursor_pointer()
+                                    .text_color(if pinned {
+                                        theme::peach()
+                                    } else {
+                                        theme::overlay0()
+                                    })
+                                    .child(SharedString::from(if pinned {
+                                        "\u{2605}"
+                                    } else {
+                                        "\u{2606}"
+                                    }))
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.palette_toggle_pin_repo(&slug_for_star, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme::text())
+                                    .child(SharedString::from(slug)),
+                            )
                         }
                         HomeRow::Folder => base
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.close_palette(window, cx);
                                 this.prompt_open_folder(cx);
                             }))
-                            .child(div().flex_shrink_0().px_1().text_color(theme::overlay0())
-                                .child(SharedString::from("\u{1F4C1}")))
-                            .child(div().text_color(theme::text())
-                                .child(SharedString::from("Open local folder\u{2026}"))),
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_1()
+                                    .text_color(theme::overlay0())
+                                    .child(SharedString::from("\u{1F4C1}")),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme::text())
+                                    .child(SharedString::from("Open local folder\u{2026}")),
+                            ),
                     };
                     list = list.child(child);
                 }
                 list.into_any_element()
-            }
-            PaletteStep::Sources { selected } => {
-                let filtered = filtered_sources(&query);
-                let selected = *selected;
-                let mut list = div().py_1().flex().flex_col();
-                if filtered.is_empty() {
-                    list = list.child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .text_color(theme::overlay0())
-                            .child(SharedString::from("no matches")),
-                    );
-                }
-                for (pos, &opt) in filtered.iter().enumerate() {
-                    list = list.child(
-                        div()
-                            .id(("palette-source", opt))
-                            .mx_1()
-                            .px_2()
-                            .h(px(PALETTE_ROW_HEIGHT))
-                            .rounded_md()
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .when(pos == selected, |row| row.bg(theme::surface0()))
-                            .when(pos != selected, |row| {
-                                row.hover(|style| {
-                                    style.bg(Hsla::from(theme::surface0()).opacity(0.5))
-                                })
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.palette_activate_source(opt, window, cx)
-                            }))
-                            .child(
-                                div()
-                                    .text_color(theme::text())
-                                    .child(SharedString::from(PALETTE_SOURCES[opt])),
-                            ),
-                    );
-                }
-                list.into_any_element()
-            }
-            PaletteStep::RepoInput { error } => {
-                let (text, color): (SharedString, gpui::Rgba) = match error {
-                    Some(err) => (err.clone(), theme::red()),
-                    None => (
-                        "enter to list open pull requests · esc to go back".into(),
-                        theme::overlay0(),
-                    ),
-                };
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_color(color)
-                    .child(text)
-                    .into_any_element()
             }
             PaletteStep::PrList { prs, .. } => match prs {
                 PrListState::Loading => div()
@@ -8025,7 +8020,13 @@ impl ReviewApp {
                                     .filter_map(|pos| Some((pos, &all[*filtered.get(pos)?])))
                                     .map(|(pos, pr)| {
                                         let is_pinned = pinned.contains(&pr.number);
-                                        palette_pr_row(pr, pos, pos == *selected, is_pinned, entity.clone())
+                                        palette_pr_row(
+                                            pr,
+                                            pos,
+                                            pos == *selected,
+                                            is_pinned,
+                                            entity.clone(),
+                                        )
                                     })
                                     .collect()
                             })
@@ -8065,7 +8066,12 @@ impl ReviewApp {
                                 let this = entity.read(cx);
                                 let Some(PaletteStep::LocalBaseList {
                                     current,
-                                    bases: BaseListState::Loaded { all, filtered, selected },
+                                    bases:
+                                        BaseListState::Loaded {
+                                            all,
+                                            filtered,
+                                            selected,
+                                        },
                                     ..
                                 }) = &this.palette
                                 else {
@@ -8090,7 +8096,9 @@ impl ReviewApp {
                                             .when(pos == *selected, |row| row.bg(theme::surface0()))
                                             .when(pos != *selected, |row| {
                                                 row.hover(|style| {
-                                                    style.bg(Hsla::from(theme::surface0()).opacity(0.5))
+                                                    style
+                                                        .bg(Hsla::from(theme::surface0())
+                                                            .opacity(0.5))
                                                 })
                                             })
                                             .on_click({
@@ -8212,7 +8220,10 @@ impl ReviewApp {
                 .as_ref()
                 .and_then(|progress| progress.lock().ok().map(|progress| progress.clone()))
                 .and_then(|progress| progress.percentage);
-            (format!(" · {}", lsp_loading_label(percentage)), theme::blue())
+            (
+                format!(" · {}", lsp_loading_label(percentage)),
+                theme::blue(),
+            )
         } else {
             (String::new(), theme::overlay0())
         };
@@ -8394,20 +8405,15 @@ impl ReviewApp {
                                     .justify_end()
                                     .child(SharedString::from((ix + 1).to_string())),
                             )
-                            .child(
-                                div()
-                                    .whitespace_nowrap()
-                                    .text_color(theme::text())
-                                    .child({
-                                        // Long lines stay plain, like the diff.
-                                        let spans = if lines[ix].len() > MAX_SYNTAX_LINE_BYTES {
-                                            &[][..]
-                                        } else {
-                                            syntax.get(ix).map(Vec::as_slice).unwrap_or(&[])
-                                        };
-                                        line_content(&lines[ix], spans, &[], None, None)
-                                    }),
-                            )
+                            .child(div().whitespace_nowrap().text_color(theme::text()).child({
+                                // Long lines stay plain, like the diff.
+                                let spans = if lines[ix].len() > MAX_SYNTAX_LINE_BYTES {
+                                    &[][..]
+                                } else {
+                                    syntax.get(ix).map(Vec::as_slice).unwrap_or(&[])
+                                };
+                                line_content(&lines[ix], spans, &[], None, None)
+                            }))
                             .into_any_element()
                         })
                         .collect()
@@ -8631,8 +8637,8 @@ impl Render for ReviewApp {
                     return;
                 }
                 let delta = f32::from(event.position.x) - f32::from(start_x);
-                let new = px((f32::from(start_w) + delta)
-                    .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH));
+                let new =
+                    px((f32::from(start_w) + delta).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH));
                 if new != this.sidebar_width {
                     this.sidebar_width = new;
                     cx.notify();
@@ -8699,10 +8705,12 @@ impl Render for ReviewApp {
                 this.apply_wrap(window, cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|_, _: &CaptureScreenshot, _, _| match capture_own_window() {
-                Ok(path) => eprintln!("lgtm: screenshot saved to {}", path.display()),
-                Err(err) => eprintln!("lgtm: screenshot failed: {err:#}"),
-            }))
+            .on_action(cx.listener(
+                |_, _: &CaptureScreenshot, _, _| match capture_own_window() {
+                    Ok(path) => eprintln!("lgtm: screenshot saved to {}", path.display()),
+                    Err(err) => eprintln!("lgtm: screenshot failed: {err:#}"),
+                },
+            ))
             .on_action(cx.listener(|this, _: &ToggleComments, _, cx| this.toggle_comments(cx)))
             .on_action(cx.listener(|this, _: &SubmitReview, window, cx| {
                 // Backstop: with the dialog open, focus sits in its input,
@@ -8881,6 +8889,10 @@ impl Render for ReviewApp {
 }
 
 #[cfg(test)]
+// Test fixtures intentionally build single-element `Vec<Range<_>>`/`[Range<_>; 1]`
+// literals (one intra-line highlight span); clippy's alternatives change the
+// meaning, so this is allowed rather than "fixed".
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
     use diff_core::{FileDiff, Hunk};
@@ -8920,7 +8932,10 @@ mod tests {
         // Empty query matches everything at the top rank.
         assert_eq!(mention_rank(&octocat, ""), Some(0));
         // Name-word prefix beats a login substring.
-        assert_eq!(mention_rank(&mention("xyz", Some("Bob Jones")), "bob"), Some(1));
+        assert_eq!(
+            mention_rank(&mention("xyz", Some("Bob Jones")), "bob"),
+            Some(1)
+        );
         assert_eq!(mention_rank(&mention("abobc", None), "bob"), Some(2));
         // Case-insensitive, and no match returns None.
         assert_eq!(mention_rank(&octocat, "OCT"), Some(0));
@@ -9287,7 +9302,10 @@ mod tests {
         // syntax span 2..7 (spans all three segments) should clip+rebase to:
         //   seg0 (bytes 0..3): 2..3 ; seg1 (3..6): 0..3 ; seg2 (6..8): 0..1
         let segs = wrap_line_spans("abcdefgh", &[], &[(2..7, syntax::Token::String)], 3);
-        assert_eq!(segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["abc", "def", "gh"]);
+        assert_eq!(
+            segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            ["abc", "def", "gh"]
+        );
         assert_eq!(segs[0].syntax, vec![(2..3, syntax::Token::String)]);
         assert_eq!(segs[1].syntax, vec![(0..3, syntax::Token::String)]);
         assert_eq!(segs[2].syntax, vec![(0..1, syntax::Token::String)]);
@@ -9620,10 +9638,23 @@ index 0000000..1111111 100644
         assert_eq!(
             rows,
             vec![
-                HomeRow::Pr { slug: "a/api".into(), number: 42, title: "Fix auth".into() },
-                HomeRow::Repo { slug: "a/api".into(), pinned: true },
-                HomeRow::Repo { slug: "a/web".into(), pinned: true },
-                HomeRow::Repo { slug: "b/infra".into(), pinned: false }, // a/web deduped
+                HomeRow::Pr {
+                    slug: "a/api".into(),
+                    number: 42,
+                    title: "Fix auth".into()
+                },
+                HomeRow::Repo {
+                    slug: "a/api".into(),
+                    pinned: true
+                },
+                HomeRow::Repo {
+                    slug: "a/web".into(),
+                    pinned: true
+                },
+                HomeRow::Repo {
+                    slug: "b/infra".into(),
+                    pinned: false
+                }, // a/web deduped
                 HomeRow::Folder,
             ]
         );
@@ -9634,21 +9665,49 @@ index 0000000..1111111 100644
         let pinned = vec!["a/api".to_string()];
         let recent = vec!["b/infra".to_string()];
         let rows = home_rows(&[], &pinned, &recent, "infra");
-        assert_eq!(rows, vec![HomeRow::Repo { slug: "b/infra".into(), pinned: false }]);
+        assert_eq!(
+            rows,
+            vec![HomeRow::Repo {
+                slug: "b/infra".into(),
+                pinned: false
+            }]
+        );
     }
 
     #[test]
     fn home_rows_matches_recent_pr_by_title_and_number() {
         let recent_prs = vec![
-            store::RecentPr { slug: "a/api".into(), number: 42, title: "Fix auth retry".into() },
-            store::RecentPr { slug: "a/web".into(), number: 7, title: "New nav".into() },
+            store::RecentPr {
+                slug: "a/api".into(),
+                number: 42,
+                title: "Fix auth retry".into(),
+            },
+            store::RecentPr {
+                slug: "a/web".into(),
+                number: 7,
+                title: "New nav".into(),
+            },
         ];
         // by title word
         let rows = home_rows(&recent_prs, &[], &[], "retry");
-        assert_eq!(rows, vec![HomeRow::Pr { slug: "a/api".into(), number: 42, title: "Fix auth retry".into() }]);
+        assert_eq!(
+            rows,
+            vec![HomeRow::Pr {
+                slug: "a/api".into(),
+                number: 42,
+                title: "Fix auth retry".into()
+            }]
+        );
         // by number
         let rows = home_rows(&recent_prs, &[], &[], "#7");
-        assert_eq!(rows, vec![HomeRow::Pr { slug: "a/web".into(), number: 7, title: "New nav".into() }]);
+        assert_eq!(
+            rows,
+            vec![HomeRow::Pr {
+                slug: "a/web".into(),
+                number: 7,
+                title: "New nav".into()
+            }]
+        );
     }
 
     #[test]
@@ -9811,15 +9870,6 @@ index 0000000..1111111 100644
     }
 
     #[test]
-    fn source_options_filter_by_substring() {
-        assert_eq!(filtered_sources(""), vec![0, 1]);
-        assert_eq!(filtered_sources("pull"), vec![0]);
-        assert_eq!(filtered_sources("FOLDER"), vec![1]);
-        assert_eq!(filtered_sources("open"), vec![0, 1]);
-        assert!(filtered_sources("nope").is_empty());
-    }
-
-    #[test]
     fn header_indices_are_correct_in_both_modes() {
         let diff = sample_diff();
         for mode in [ViewMode::Unified, ViewMode::Split] {
@@ -9915,7 +9965,7 @@ index 0000000..1111111 100644
 
     #[test]
     fn row_range_unified_multi_row() {
-        let rows = vec![line("first line"), line("middle"), line("last line")];
+        let rows = [line("first line"), line("middle"), line("last line")];
         let sel = sel(SelSide::Unified, (0, 6), (2, 4));
         // First row: from col 6 to end of text.
         assert_eq!(row_selection_range(&sel, 0, &rows[0]), Some(6..10));
@@ -9946,7 +9996,7 @@ index 0000000..1111111 100644
 
     #[test]
     fn row_range_split_sides_and_absent_cells() {
-        let rows = vec![
+        let rows = [
             split(Some("left one"), Some("right one")),
             split(None, Some("right only")),
             split(Some("left only"), None),
@@ -9963,7 +10013,7 @@ index 0000000..1111111 100644
 
     #[test]
     fn row_range_clamps_columns_to_text() {
-        let rows = vec![line("ab"), line("cdef")];
+        let rows = [line("ab"), line("cdef")];
         // Anchor col way past the end of a short line.
         let sel = sel(SelSide::Unified, (0, 99), (1, 2));
         assert_eq!(row_selection_range(&sel, 0, &rows[0]), Some(2..2)); // empty
@@ -10029,10 +10079,7 @@ index 0000000..1111111 100644
         };
         let rows = vec![line("first part of a "), continuation("wrapped line")];
         let all = sel(SelSide::Unified, (0, 0), (1, 20));
-        assert_eq!(
-            selection_text(&all, &rows),
-            "first part of a wrapped line"
-        );
+        assert_eq!(selection_text(&all, &rows), "first part of a wrapped line");
         // A fresh logical line after a continuation still gets its newline.
         let rows = vec![
             line("first part of a "),
@@ -10190,7 +10237,10 @@ index 0000000..1111111 100644
                 syntax: Vec::new(),
             }),
         };
-        let rows = vec![split(Some("first"), Some("first")), split_cont("wrap", "wrap")];
+        let rows = vec![
+            split(Some("first"), Some("first")),
+            split_cont("wrap", "wrap"),
+        ];
         let mm = minimap_rows(&rows);
         assert_eq!(mm.len(), rows.len());
         assert_eq!(mm[1], mrow(MinimapKind::Blank, 0.));
@@ -10349,6 +10399,9 @@ index 0000000..1111111 100644
 
     // --- Review comments ----------------------------------------------------
 
+    // Test-fixture builder; known god-module smell (many params), tracked
+    // under the ARCH refactor.
+    #[allow(clippy::too_many_arguments)]
     fn rc(
         id: u64,
         path: &str,
