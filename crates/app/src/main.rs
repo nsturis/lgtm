@@ -463,6 +463,33 @@ fn nth_row_start(rows: &[Row], n: usize) -> usize {
     rows.len().saturating_sub(1)
 }
 
+/// The file `row` falls in (its position in `file_rows`, aligned with
+/// `file_ix`) plus its offset from that file's header row. `None` when `row`
+/// is before the first file header.
+fn locate_in_file(file_rows: &[usize], row: usize) -> (Option<usize>, usize) {
+    match file_rows.iter().rposition(|&r| r <= row) {
+        Some(fx) => (Some(fx), row - file_rows[fx]),
+        None => (None, row),
+    }
+}
+
+/// Inverse of [`locate_in_file`]: the row for `file` + `file_offset` in the
+/// (possibly rebuilt) `file_rows`, clamped to that file's row range and to
+/// the last row overall.
+fn resolve_in_file(file_rows: &[usize], rows_len: usize, file: Option<usize>, offset: usize) -> usize {
+    match file.and_then(|fx| file_rows.get(fx).copied()) {
+        Some(start) => {
+            let end = file
+                .and_then(|fx| file_rows.get(fx + 1).copied())
+                .unwrap_or(rows_len);
+            (start + offset)
+                .min(end.saturating_sub(1))
+                .min(rows_len.saturating_sub(1))
+        }
+        None => rows_len.saturating_sub(1),
+    }
+}
+
 // --- Review comments -------------------------------------------------------
 
 /// Which diff side a review comment anchors to, GitHub's LEFT/RIGHT.
@@ -1202,6 +1229,12 @@ fn file_signature(file: &FileDiff) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     file.display_path().hash(&mut h);
+    // Binary files have no hunks, so without these the signature degenerates
+    // to hash(path) and never changes when the binary content does; hashing
+    // additions/deletions/status catches that (they move when content does).
+    file.additions.hash(&mut h);
+    file.deletions.hash(&mut h);
+    file.status.hash(&mut h);
     for hunk in &file.hunks {
         (hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count).hash(&mut h);
         for row in &hunk.rows {
@@ -2879,6 +2912,45 @@ impl ItemData {
             .set_offset(point(offset.x, px(-(new_top as f32 * ROW_HEIGHT + frac))));
     }
 
+    /// Rebuild the display rows after a file's viewed state flips (its rows
+    /// collapse to/expand from just the header), keeping the viewport
+    /// anchored. Unlike [`Self::rebuild_rows_anchored`] — which counts
+    /// non-comment rows and is correct there because only comment rows are
+    /// added/removed — toggling viewed changes the row count of exactly one
+    /// file, so a flat row-rank anchor would jump the viewport by roughly
+    /// that file's row count when it's above the viewport. Anchoring on
+    /// (file, offset within that file) instead is exact for every file other
+    /// than the toggled one, and lands sensibly on the toggled file's header
+    /// when it's the one collapsing under the viewport.
+    fn rebuild_rows_anchored_to_file(&mut self) {
+        let offset = self.scroll.0.borrow().base_handle.offset();
+        let top_px = f32::from(-offset.y).max(0.);
+        let top_row =
+            ((top_px / ROW_HEIGHT).floor() as usize).min(self.rows.len().saturating_sub(1));
+        let frac = top_px - top_row as f32 * ROW_HEIGHT;
+        let (top_file, top_offset) = locate_in_file(&self.file_rows, top_row);
+        let cursor_row = self.cursor.min(self.rows.len().saturating_sub(1));
+        let (cursor_file, cursor_offset) = locate_in_file(&self.file_rows, cursor_row);
+        let built = build_rows_cached(
+            &self.diff,
+            self.mode,
+            &self.upgrades,
+            self.comments.as_ref(),
+            self.comments_visible,
+            &mut self.hunk_syntax_cache,
+            &self.viewed,
+        );
+        self.set_rows(built);
+        self.selection = None;
+        self.cursor = resolve_in_file(&self.file_rows, self.rows.len(), cursor_file, cursor_offset);
+        let new_top = resolve_in_file(&self.file_rows, self.rows.len(), top_file, top_offset);
+        self.scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(offset.x, px(-(new_top as f32 * ROW_HEIGHT + frac))));
+    }
+
     /// The minimap quad runs for this pane height, from the cache when the
     /// height hasn't changed since the last paint.
     fn minimap_layout(&self, pane_px: f32) -> Rc<MinimapLayout> {
@@ -3111,6 +3183,22 @@ impl ReviewItem {
                 });
                 data.rebuild_tree();
                 data.resolve_viewed(store);
+                if !data.viewed.is_empty() {
+                    // The background thread built these rows via the public
+                    // `build_rows` with an empty viewed set (no `Store` there),
+                    // so a resolved-viewed file must be rebuilt collapsed here
+                    // — mirrors the refresh branch above.
+                    let built = build_rows_cached(
+                        &data.diff,
+                        data.mode,
+                        &data.upgrades,
+                        data.comments.as_ref(),
+                        data.comments_visible,
+                        &mut data.hunk_syntax_cache,
+                        &data.viewed,
+                    );
+                    data.set_rows(built);
+                }
                 self.state = ItemState::Ready(data);
             }
         }
@@ -5281,7 +5369,7 @@ impl ReviewApp {
             true
         };
         let review_id = data.review_id.clone();
-        data.rebuild_rows_anchored();
+        data.rebuild_rows_anchored_to_file();
         data.rebuild_tree();
         self.store.set_viewed(&review_id, &path, sig, now_viewed);
         self.save_store();
@@ -9658,6 +9746,35 @@ index 0000000..1111111 100644
     }
 
     #[test]
+    fn locate_and_resolve_in_file_anchor_survives_a_row_count_shift_elsewhere() {
+        // Three files: header rows at 0, 10, 20 (file 0 has 10 rows, file 1
+        // has 10 rows, file 2 has whatever). The viewport is scrolled into
+        // file 1, offset 3 from its header.
+        let old_file_rows = vec![0usize, 10, 20];
+        let top_row = 13; // file 1, offset 3
+        let (top_file, top_offset) = locate_in_file(&old_file_rows, top_row);
+        assert_eq!(top_file, Some(1));
+        assert_eq!(top_offset, 3);
+
+        // File 0 (above the viewport) collapses from 10 rows to 1: file 1's
+        // header moves from row 10 to row 1.
+        let new_file_rows = vec![0usize, 1, 11];
+        let new_rows_len = 21 - 9; // file 0 lost 9 rows
+        let new_top = resolve_in_file(&new_file_rows, new_rows_len, top_file, top_offset);
+        // Anchored on (file, offset), the viewport stays at the same spot
+        // inside file 1 rather than jumping by file 0's row-count delta.
+        assert_eq!(new_top, 1 + 3);
+
+        // The toggled file itself: if the viewport were inside file 0 and
+        // file 0 collapses to just its header, the anchor clamps to that
+        // header rather than pointing past the file's new (shorter) range.
+        let (top_file0, top_offset0) = locate_in_file(&old_file_rows, 5); // file 0, offset 5
+        assert_eq!(top_file0, Some(0));
+        let resolved = resolve_in_file(&new_file_rows, new_rows_len, top_file0, top_offset0);
+        assert_eq!(resolved, 0, "clamped to file 0's only remaining row (its header)");
+    }
+
+    #[test]
     fn which_on_path_resolves_and_rejects() {
         // `sh` is always on a test runner's PATH; a bogus name never is.
         assert!(which_on_path("sh").is_some());
@@ -9688,6 +9805,35 @@ index 0000000..1111111 100644
         let mut diff3 = sample_diff();
         diff3.files[0].hunks[0].old_start += 1;
         assert_ne!(a, file_signature(&diff3.files[0]));
+    }
+
+    #[test]
+    fn file_signature_changes_for_binary_content_changes() {
+        // Binary files have no hunks, so without hashing additions/deletions/
+        // status the signature degenerates to hash(path) alone and never
+        // changes when the binary content does.
+        let diff = sample_diff();
+        let binary = &diff.files[1];
+        assert_eq!(binary.status, FileStatus::Binary);
+        assert!(binary.hunks.is_empty());
+        let base = file_signature(binary);
+
+        let mut changed_counts = sample_diff();
+        changed_counts.files[1].additions = 3;
+        changed_counts.files[1].deletions = 1;
+        assert_ne!(
+            base,
+            file_signature(&changed_counts.files[1]),
+            "changed add/del counts on a binary file must change its signature"
+        );
+
+        let mut changed_status = sample_diff();
+        changed_status.files[1].status = FileStatus::Added;
+        assert_ne!(
+            base,
+            file_signature(&changed_status.files[1]),
+            "changed status on a binary file must change its signature"
+        );
     }
 
     #[test]
@@ -10341,6 +10487,77 @@ index 0000000..1111111 100644
             other => panic!("expected file header, got {}", row_name(other)),
         }
         assert!(matches!(rows[file_rows[1] + 1], Row::Binary));
+    }
+
+    #[test]
+    fn fresh_install_applies_resolved_viewed_to_initial_rows() {
+        // The background thread builds `Loaded.rows` via the public
+        // `build_rows` with an empty viewed set (no `Store` there). A fresh
+        // `install()` must rebuild the rows once `resolve_viewed` picks up a
+        // pre-populated store entry, so a previously-reviewed file starts
+        // collapsed rather than momentarily (or permanently) expanded.
+        let src = git::LocalSource {
+            repo_root: "/tmp/myrepo".into(),
+            branch: "feature".into(),
+            base_ref: None,
+            base_label: "origin/main".into(),
+            base_oid: None,
+        };
+        let review_id_str = review_id(&Source::Local(src.clone()));
+
+        let diff = sample_diff();
+        let sig = file_signature(&diff.files[0]); // a.rs, non-binary, has hunks
+        let path = diff.files[0].display_path().to_string();
+        let mut store = Store::default();
+        store.set_viewed(&review_id_str, &path, sig, true);
+
+        // Rows as the background thread would have built them: expanded,
+        // since it has no access to the store.
+        let (rows, file_rows, hunk_rows) =
+            build_rows(&diff, ViewMode::Unified, &HashMap::new(), None, true);
+        assert!(
+            rows[file_rows[0]..file_rows[1]]
+                .iter()
+                .any(|r| matches!(r, Row::HunkHeader { .. })),
+            "background rows should be expanded before install resolves viewed"
+        );
+
+        let loaded = Loaded {
+            meta: LoadedMeta::Local(src.clone()),
+            diff,
+            patch: String::new(),
+            rows,
+            file_rows,
+            hunk_rows,
+            mode: ViewMode::Unified,
+            comments: None,
+        };
+        let mut item = ReviewItem {
+            id: 0,
+            source: Source::Local(src),
+            state: ItemState::Loading,
+            reloading: false,
+            refresh_error: None,
+            upgrade_gen: 0,
+            lsp_gen: 0,
+        };
+
+        item.install(loaded, &store);
+
+        let ItemState::Ready(data) = &item.state else {
+            panic!("expected item to be Ready after install");
+        };
+        assert!(data.viewed.contains(&0), "resolve_viewed should mark file 0 viewed");
+        match &data.rows[data.file_rows[0]] {
+            Row::FileHeader { viewed, .. } => assert!(*viewed, "header should render as viewed"),
+            other => panic!("expected file header, got {}", row_name(other)),
+        }
+        assert!(
+            !data.rows[..data.file_rows[1]]
+                .iter()
+                .any(|r| matches!(r, Row::HunkHeader { .. } | Row::Line { .. })),
+            "the viewed file's rows must be collapsed to just its header"
+        );
     }
 
     fn line(text: &str) -> Row {

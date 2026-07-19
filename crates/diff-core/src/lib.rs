@@ -10,7 +10,7 @@ pub struct PrDiff {
     pub files: Vec<FileDiff>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileStatus {
     Added,
     Deleted,
