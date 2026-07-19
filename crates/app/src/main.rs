@@ -2993,19 +2993,38 @@ fn filter_base_refs(all: &[String], query: &str) -> Vec<usize> {
 /// A row in the repo-home palette step.
 #[derive(Debug, Clone, PartialEq)]
 enum HomeRow {
+    /// A recently-opened PR — clicking reopens it directly (no repo → list →
+    /// pick chain, no network fetch).
+    Pr { slug: String, number: u64, title: String },
     /// A repo "owner/repo"; `pinned` marks favourites.
     Repo { slug: String, pinned: bool },
     /// The "open local folder" affordance, always last.
     Folder,
 }
 
-/// Rows for the repo-home step: pinned repos first (in pin order), then recent
-/// repos not already pinned, filtered by a case-insensitive substring query,
-/// with the Folder row last (kept only when it matches a non-empty query).
-fn home_rows(pinned: &[String], recent: &[String], query: &str) -> Vec<HomeRow> {
+/// Rows for the repo-home step: recent PRs first (one-click reopen), then
+/// pinned repos (in pin order), then recent repos not already pinned, all
+/// filtered by a case-insensitive substring query, with the Folder row last
+/// (kept only when it still matches the query).
+fn home_rows(
+    recent_prs: &[store::RecentPr],
+    pinned: &[String],
+    recent: &[String],
+    query: &str,
+) -> Vec<HomeRow> {
     let q = query.trim().to_lowercase();
     let matches = |s: &str| q.is_empty() || s.to_lowercase().contains(&q);
     let mut rows = Vec::new();
+    for pr in recent_prs {
+        // A recent PR matches on its repo, number, or title.
+        if matches(&pr.slug) || matches(&format!("#{}", pr.number)) || matches(&pr.title) {
+            rows.push(HomeRow::Pr {
+                slug: pr.slug.clone(),
+                number: pr.number,
+                title: pr.title.clone(),
+            });
+        }
+    }
     for slug in pinned {
         if matches(slug) {
             rows.push(HomeRow::Repo { slug: slug.clone(), pinned: true });
@@ -4149,6 +4168,9 @@ impl ReviewApp {
                 .await;
             this.update(cx, |app, cx| {
                 let mut restart_lsp = false;
+                // A just-loaded PR (with its now-known title) to record as recent,
+                // applied after the `item` borrow ends to avoid aliasing `app`.
+                let mut recent_pr: Option<(String, u64, String)> = None;
                 let Some(item) = app.items.iter_mut().find(|item| item.id == id) else {
                     return;
                 };
@@ -4164,6 +4186,12 @@ impl ReviewApp {
                         item.upgrade_gen += 1;
                         let gen = item.upgrade_gen;
                         if let ItemState::Ready(data) = &item.state {
+                            // Feed the cmd-k home's "recent PRs" list, now that
+                            // the title is known — one-click reopen later.
+                            if let (Source::Pr(loc), Some(meta)) = (&item.source, &data.pr_meta) {
+                                recent_pr =
+                                    Some((loc.repo_slug(), loc.number, meta.title.clone()));
+                            }
                             let jobs: Vec<UpgradeJob> = data
                                 .diff
                                 .files
@@ -4207,6 +4235,10 @@ impl ReviewApp {
                             _ => item.state = ItemState::Failed(msg),
                         }
                     }
+                }
+                if let Some((slug, number, title)) = recent_pr {
+                    app.store.note_recent_pr(&slug, number, &title);
+                    app.save_store();
                 }
                 if restart_lsp {
                     app.restart_lsp_for_item(id, cx);
@@ -4536,7 +4568,7 @@ impl ReviewApp {
         let query = self.palette_input.read(cx).value().to_string();
         match &mut self.palette {
             Some(PaletteStep::RepoHome { selected }) => {
-                let len = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query).len();
+                let len = home_rows(&self.store.recent_prs, &self.store.pinned_repos, &self.store.recent_repos, &query).len();
                 if len > 0 {
                     *selected = (*selected as isize + delta).clamp(0, len as isize - 1) as usize;
                 }
@@ -4586,7 +4618,7 @@ impl ReviewApp {
             .unwrap_or_default();
         match &mut self.palette {
             Some(PaletteStep::RepoHome { selected }) => {
-                let len = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query).len();
+                let len = home_rows(&self.store.recent_prs, &self.store.pinned_repos, &self.store.recent_repos, &query).len();
                 *selected = (*selected).min(len.saturating_sub(1));
             }
             Some(PaletteStep::Sources { selected }) => {
@@ -4669,8 +4701,11 @@ impl ReviewApp {
             return;
         };
         let selected = *selected;
-        let rows = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query);
+        let rows = home_rows(&self.store.recent_prs, &self.store.pinned_repos, &self.store.recent_repos, &query);
         match rows.into_iter().nth(selected) {
+            Some(HomeRow::Pr { slug, number, .. }) => {
+                self.palette_open_recent_pr(&slug, number, window, cx)
+            }
             Some(HomeRow::Repo { slug, .. }) => self.palette_home_activate(&slug, window, cx),
             Some(HomeRow::Folder) => {
                 self.close_palette(window, cx);
@@ -4678,6 +4713,26 @@ impl ReviewApp {
             }
             None => {}
         }
+    }
+
+    /// Open a recent PR straight from the home step — one step, no PR-list fetch.
+    fn palette_open_recent_pr(
+        &mut self,
+        slug: &str,
+        number: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((owner, repo)) = slug.split_once('/') else {
+            return;
+        };
+        let source = Source::Pr(gh::PrLocator {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number,
+        });
+        self.close_palette(window, cx);
+        self.open_item(source, cx);
     }
 
     /// Open a repo slug's PR list from the home step.
@@ -7221,7 +7276,7 @@ impl ReviewApp {
         let body: gpui::AnyElement = match step {
             PaletteStep::RepoHome { selected } => {
                 let selected = *selected;
-                let rows = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query);
+                let rows = home_rows(&self.store.recent_prs, &self.store.pinned_repos, &self.store.recent_repos, &query);
                 let mut list = div().py_1().flex().flex_col();
                 // The primary action of this screen is "type owner/repo to open
                 // a GitHub PR". Without a visible cue, a first-run user (no pins
@@ -7252,6 +7307,26 @@ impl ReviewApp {
                         .when(is_sel, |r| r.bg(theme::surface0()))
                         .when(!is_sel, |r| r.hover(|s| s.bg(Hsla::from(theme::surface0()).opacity(0.5))));
                     let child = match row {
+                        HomeRow::Pr { slug, number, title } => {
+                            let (s, n) = (slug.clone(), number);
+                            base
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.palette_open_recent_pr(&s, n, window, cx)
+                                }))
+                                .child(
+                                    div()
+                                        .w(px(8.)).h(px(8.)).flex_shrink_0()
+                                        .rounded_full().bg(theme::green()),
+                                )
+                                .child(
+                                    div().flex_shrink_0().text_color(theme::subtext())
+                                        .child(SharedString::from(format!("{slug}#{number}"))),
+                                )
+                                .child(
+                                    div().flex_1().min_w_0().truncate().text_color(theme::text())
+                                        .child(SharedString::from(title)),
+                                )
+                        }
                         HomeRow::Repo { slug, pinned } => {
                             let slug_for_row = slug.clone();
                             let slug_for_star = slug.clone();
@@ -8726,13 +8801,19 @@ mod tests {
     }
 
     #[test]
-    fn home_rows_pinned_first_then_recent_then_folder() {
+    fn home_rows_prs_first_then_pinned_then_recent_then_folder() {
+        let recent_prs = vec![store::RecentPr {
+            slug: "a/api".into(),
+            number: 42,
+            title: "Fix auth".into(),
+        }];
         let pinned = vec!["a/api".to_string(), "a/web".to_string()];
         let recent = vec!["a/web".to_string(), "b/infra".to_string()];
-        let rows = home_rows(&pinned, &recent, "");
+        let rows = home_rows(&recent_prs, &pinned, &recent, "");
         assert_eq!(
             rows,
             vec![
+                HomeRow::Pr { slug: "a/api".into(), number: 42, title: "Fix auth".into() },
                 HomeRow::Repo { slug: "a/api".into(), pinned: true },
                 HomeRow::Repo { slug: "a/web".into(), pinned: true },
                 HomeRow::Repo { slug: "b/infra".into(), pinned: false }, // a/web deduped
@@ -8745,8 +8826,22 @@ mod tests {
     fn home_rows_filters_by_query_and_drops_folder() {
         let pinned = vec!["a/api".to_string()];
         let recent = vec!["b/infra".to_string()];
-        let rows = home_rows(&pinned, &recent, "infra");
+        let rows = home_rows(&[], &pinned, &recent, "infra");
         assert_eq!(rows, vec![HomeRow::Repo { slug: "b/infra".into(), pinned: false }]);
+    }
+
+    #[test]
+    fn home_rows_matches_recent_pr_by_title_and_number() {
+        let recent_prs = vec![
+            store::RecentPr { slug: "a/api".into(), number: 42, title: "Fix auth retry".into() },
+            store::RecentPr { slug: "a/web".into(), number: 7, title: "New nav".into() },
+        ];
+        // by title word
+        let rows = home_rows(&recent_prs, &[], &[], "retry");
+        assert_eq!(rows, vec![HomeRow::Pr { slug: "a/api".into(), number: 42, title: "Fix auth retry".into() }]);
+        // by number
+        let rows = home_rows(&recent_prs, &[], &[], "#7");
+        assert_eq!(rows, vec![HomeRow::Pr { slug: "a/web".into(), number: 7, title: "New nav".into() }]);
     }
 
     #[test]
