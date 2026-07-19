@@ -2967,6 +2967,8 @@ fn local_titlebar_content(
 
 /// The cmd-k command palette: a staged flow for opening things.
 enum PaletteStep {
+    /// Step 0 (cmd-k entry): pinned + recent repos, or type a new owner/repo.
+    RepoHome { selected: usize },
     /// Step 1: pick what to open.
     Sources { selected: usize },
     /// Step 2 (GitHub path): type `owner/repo`.
@@ -4556,9 +4558,9 @@ impl ReviewApp {
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = Some(PaletteStep::Sources { selected: 0 });
+        self.palette = Some(PaletteStep::RepoHome { selected: 0 });
         self.palette_gen += 1;
-        self.set_palette_input("", "type to filter…", window, cx);
+        self.set_palette_input("", "type a repo (owner/repo) or filter…", window, cx);
         cx.notify();
     }
 
@@ -4572,18 +4574,19 @@ impl ReviewApp {
     /// Esc: one step back, or close from step 1.
     fn palette_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.palette {
-            None | Some(PaletteStep::Sources { .. }) => self.close_palette(window, cx),
+            None | Some(PaletteStep::RepoHome { .. }) => self.close_palette(window, cx),
+            Some(PaletteStep::Sources { .. }) => self.close_palette(window, cx),
             Some(PaletteStep::RepoInput { .. }) => {
-                self.palette = Some(PaletteStep::Sources { selected: 0 });
+                self.palette = Some(PaletteStep::RepoHome { selected: 0 });
                 self.palette_gen += 1;
-                self.set_palette_input("", "type to filter…", window, cx);
+                self.set_palette_input("", "type a repo (owner/repo) or filter…", window, cx);
                 cx.notify();
             }
             Some(PaletteStep::PrList { repo, .. }) => {
                 let repo = repo.clone();
-                self.palette = Some(PaletteStep::RepoInput { error: None });
+                self.palette = Some(PaletteStep::RepoHome { selected: 0 });
                 self.palette_gen += 1;
-                self.set_palette_input(&repo, "owner/repo", window, cx);
+                self.set_palette_input(&repo, "type a repo (owner/repo) or filter…", window, cx);
                 cx.notify();
             }
             Some(PaletteStep::LocalBaseList { .. }) => self.close_palette(window, cx),
@@ -4593,6 +4596,12 @@ impl ReviewApp {
     fn palette_move(&mut self, delta: isize, cx: &mut Context<Self>) {
         let query = self.palette_input.read(cx).value().to_string();
         match &mut self.palette {
+            Some(PaletteStep::RepoHome { selected }) => {
+                let len = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query).len();
+                if len > 0 {
+                    *selected = (*selected as isize + delta).clamp(0, len as isize - 1) as usize;
+                }
+            }
             Some(PaletteStep::Sources { selected }) => {
                 let len = filtered_sources(&query).len();
                 if len > 0 {
@@ -4632,6 +4641,10 @@ impl ReviewApp {
     fn palette_query_changed(&mut self, cx: &mut Context<Self>) {
         let query = self.palette_input.read(cx).value().to_string();
         match &mut self.palette {
+            Some(PaletteStep::RepoHome { selected }) => {
+                let len = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query).len();
+                *selected = (*selected).min(len.saturating_sub(1));
+            }
             Some(PaletteStep::Sources { selected }) => {
                 let len = filtered_sources(&query).len();
                 *selected = (*selected).min(len.saturating_sub(1));
@@ -4667,6 +4680,7 @@ impl ReviewApp {
     fn palette_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.palette_input.read(cx).value().trim().to_string();
         match &self.palette {
+            Some(PaletteStep::RepoHome { .. }) => self.palette_home_confirm(window, cx),
             Some(PaletteStep::Sources { selected }) => {
                 if let Some(&opt) = filtered_sources(&query).get(*selected) {
                     self.palette_activate_source(opt, window, cx);
@@ -4699,6 +4713,43 @@ impl ReviewApp {
         }
     }
 
+    /// Enter on the repo-home step: a fully-typed `owner/repo` always wins;
+    /// otherwise act on the selected row (open a repo or the folder dialog).
+    fn palette_home_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.palette_input.read(cx).value().trim().to_string();
+        if let Ok((owner, repo)) = parse_repo_slug(&query) {
+            self.palette_fetch_prs(owner, repo, window, cx);
+            return;
+        }
+        let Some(PaletteStep::RepoHome { selected }) = &self.palette else {
+            return;
+        };
+        let selected = *selected;
+        let rows = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query);
+        match rows.into_iter().nth(selected) {
+            Some(HomeRow::Repo { slug, .. }) => self.palette_home_activate(&slug, window, cx),
+            Some(HomeRow::Folder) => {
+                self.close_palette(window, cx);
+                self.prompt_open_folder(cx);
+            }
+            None => {}
+        }
+    }
+
+    /// Open a repo slug's PR list from the home step.
+    fn palette_home_activate(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Ok((owner, repo)) = parse_repo_slug(slug) {
+            self.palette_fetch_prs(owner, repo, window, cx);
+        }
+    }
+
+    /// Toggle a repo's pin from the home step, persist, and stay on the step.
+    fn palette_toggle_pin_repo(&mut self, slug: &str, cx: &mut Context<Self>) {
+        self.store.toggle_pinned_repo(slug);
+        self.save_store();
+        cx.notify();
+    }
+
     fn palette_activate_source(&mut self, opt: usize, window: &mut Window, cx: &mut Context<Self>) {
         match opt {
             SOURCE_PR => {
@@ -4726,12 +4777,16 @@ impl ReviewApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let slug = format!("{owner}/{repo}");
         self.palette_gen += 1;
         let gen = self.palette_gen;
         self.palette = Some(PaletteStep::PrList {
-            repo: format!("{owner}/{repo}"),
+            repo: slug.clone(),
             prs: PrListState::Loading,
         });
+        self.active_repo = Some(slug.clone());
+        self.store.note_recent_repo(&slug);
+        self.save_store();
         self.set_palette_input("", "search pull requests…", window, cx);
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -7212,6 +7267,7 @@ impl ReviewApp {
         let query = self.palette_input.read(cx).value().to_string();
 
         let header: Option<SharedString> = match step {
+            PaletteStep::RepoHome { .. } => None,
             PaletteStep::Sources { .. } => None,
             PaletteStep::RepoInput { .. } => Some("Open GitHub pull request".into()),
             PaletteStep::PrList { repo, .. } => Some(repo.clone().into()),
@@ -7219,6 +7275,60 @@ impl ReviewApp {
         };
 
         let body: gpui::AnyElement = match step {
+            PaletteStep::RepoHome { selected } => {
+                let selected = *selected;
+                let rows = home_rows(&self.store.pinned_repos, &self.store.recent_repos, &query);
+                let mut list = div().py_1().flex().flex_col();
+                if rows.is_empty() {
+                    list = list.child(
+                        div().px_3().py_2().text_color(theme::overlay0())
+                            .child(SharedString::from("no matches — type owner/repo and press enter")),
+                    );
+                }
+                for (pos, row) in rows.into_iter().enumerate() {
+                    let is_sel = pos == selected;
+                    let base = div()
+                        .id(("palette-home", pos))
+                        .mx_1().px_2().h(px(PALETTE_ROW_HEIGHT)).rounded_md()
+                        .flex().items_center().gap_2().cursor_pointer()
+                        .when(is_sel, |r| r.bg(theme::surface0()))
+                        .when(!is_sel, |r| r.hover(|s| s.bg(Hsla::from(theme::surface0()).opacity(0.5))));
+                    let child = match row {
+                        HomeRow::Repo { slug, pinned } => {
+                            let slug_for_row = slug.clone();
+                            let slug_for_star = slug.clone();
+                            base
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.palette_home_activate(&slug_for_row, window, cx)
+                                }))
+                                .child(
+                                    div()
+                                        .id(("palette-home-star", pos))
+                                        .flex_shrink_0().px_1().cursor_pointer()
+                                        .text_color(if pinned { theme::peach() } else { theme::overlay0() })
+                                        .child(SharedString::from(if pinned { "\u{2605}" } else { "\u{2606}" }))
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.palette_toggle_pin_repo(&slug_for_star, cx);
+                                        })),
+                                )
+                                .child(div().flex_1().min_w_0().truncate().text_color(theme::text())
+                                    .child(SharedString::from(slug)))
+                        }
+                        HomeRow::Folder => base
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.close_palette(window, cx);
+                                this.prompt_open_folder(cx);
+                            }))
+                            .child(div().flex_shrink_0().px_1().text_color(theme::overlay0())
+                                .child(SharedString::from("\u{1F4C1}")))
+                            .child(div().text_color(theme::text())
+                                .child(SharedString::from("Open local folder\u{2026}"))),
+                    };
+                    list = list.child(child);
+                }
+                list.into_any_element()
+            }
             PaletteStep::Sources { selected } => {
                 let filtered = filtered_sources(&query);
                 let selected = *selected;
