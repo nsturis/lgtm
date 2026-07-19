@@ -8332,6 +8332,41 @@ mod tests {
         style
     }
 
+    // End-to-end guard for the highlight pipeline: a parsed patch, run through
+    // build_rows in patch-only mode (no upgrades), must produce Line rows that
+    // actually carry syntax spans. If this passes but the app looks unhighlighted,
+    // the binary is stale — rebuild.
+    #[test]
+    fn build_rows_emits_syntax_spans() {
+        let patch = "\
+diff --git a/x.rs b/x.rs
+index 0000000..1111111 100644
+--- a/x.rs
++++ b/x.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    let x = 1;
++    let x = 2;
+ }
+";
+        let diff = diff_core::parse_patch(patch);
+        let (rows, _, _) = build_rows(&diff, ViewMode::Unified, &HashMap::new(), None, false);
+        let highlighted_lines = rows
+            .iter()
+            .filter(|row| matches!(row, Row::Line { syntax, .. } if !syntax.is_empty()))
+            .count();
+        assert!(
+            highlighted_lines > 0,
+            "no Line row carried syntax spans — highlight pipeline is broken"
+        );
+        // The added `let x = 2;` line specifically should carry a keyword token.
+        let added_has_keyword = rows.iter().any(|row| {
+            matches!(row, Row::Line { kind: LineKind::Added, syntax, .. }
+                if syntax.iter().any(|&(_, t)| t == syntax::Token::Keyword))
+        });
+        assert!(added_has_keyword, "added line missing `let` keyword span");
+    }
+
     #[test]
     fn merge_syntax_only() {
         let syntax = [(0..2, Token::Keyword), (3..7, Token::Function)];

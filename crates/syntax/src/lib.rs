@@ -655,7 +655,10 @@ mod tests {
     #[test]
     fn vue_highlights_template() {
         let vue = language_for_path("App.vue").unwrap();
-        let lines = highlight_lines(vue, "<template>\n  <div v-if=\"ok\">{{ msg }}</div>\n</template>");
+        let lines = highlight_lines(
+            vue,
+            "<template>\n  <div v-if=\"ok\">{{ msg }}</div>\n</template>",
+        );
         // The grammar tags template structure/tag names as @tag (-> Function).
         assert!(
             lines.iter().flatten().any(|&(_, t)| t == Token::Function),
