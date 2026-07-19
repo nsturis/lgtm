@@ -3859,6 +3859,11 @@ const RUST_LSP_WARMUP_KEYWORDS: &[&str] = &[
 struct ReviewApp {
     items: Vec<ReviewItem>,
     active: usize,
+    /// Durable pinned/recent repos + pinned PRs (the only persisted state).
+    store: Store,
+    /// Repo slug ("owner/repo") the palette PR-list is currently showing, so
+    /// pin toggles and re-ordering know which repo they apply to.
+    active_repo: Option<String>,
     sidebar_visible: bool,
     open_input: gpui::Entity<InputState>,
     open_error: Option<SharedString>,
@@ -3981,6 +3986,8 @@ impl ReviewApp {
         let mut this = Self {
             items: Vec::new(),
             active: 0,
+            store: Store::load(),
+            active_repo: None,
             sidebar_visible: !errors.is_empty() || sources.len() != 1,
             open_input,
             open_error: errors.first().cloned().map(SharedString::from),
@@ -4456,6 +4463,10 @@ impl ReviewApp {
             state.set_placeholder(placeholder, window, cx);
             state.focus(window, cx);
         });
+    }
+
+    fn save_store(&self) {
+        self.store.save();
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
