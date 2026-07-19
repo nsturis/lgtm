@@ -336,9 +336,14 @@ static CSS: Language = Language::new(|| {
     .ok()
 });
 
+// `LANGUAGE_PHP_ONLY`, not `LANGUAGE_PHP`: the full grammar starts in HTML/text
+// mode and only highlights code inside `<?php … ?>`, so diff hunk fragments
+// (which rarely include the opening tag) render as plain text. `php_only` parses
+// its input as pure PHP, so bare fragments highlight. Its grammar still defines
+// `php_tag`/`php_end_tag`, so the bundled highlights query compiles unchanged.
 static PHP: Language = Language::new(|| {
     HighlightConfiguration::new(
-        tree_sitter_php::LANGUAGE_PHP.into(),
+        tree_sitter_php::LANGUAGE_PHP_ONLY.into(),
         "php",
         tree_sitter_php::HIGHLIGHTS_QUERY,
         "",
@@ -407,6 +412,23 @@ static SQL: Language = Language::new(|| {
     .ok()
 });
 
+// Vue single-file components. Like tree-sitter-scss this grammar predates the
+// LanguageFn convention, so `language()` returns a `Language` directly (no
+// `.into()`). Highlights the template structure, tags, and Vue directives
+// (v-if, @click, :prop, …); the JS/TS inside `<script>` and CSS inside
+// `<style>` stay plain, since (as noted at the top of this file) we run no
+// injection callback — same tradeoff as HTML.
+static VUE: Language = Language::new(|| {
+    HighlightConfiguration::new(
+        tree_sitter_vue_updated::language(),
+        "vue",
+        tree_sitter_vue_updated::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()
+});
+
 /// Resolve a language from a path's extension. `None` means "render plain".
 pub fn language_for_path(path: &str) -> Option<&'static Language> {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -437,6 +459,7 @@ pub fn language_for_path(path: &str) -> Option<&'static Language> {
         "scss" | "sass" => &SCSS,
         "md" | "markdown" => &MARKDOWN,
         "sql" => &SQL,
+        "vue" => &VUE,
         _ => return None,
     };
     Some(lang)
@@ -543,6 +566,7 @@ mod tests {
             ("scss", &SCSS),
             ("markdown", &MARKDOWN),
             ("sql", &SQL),
+            ("vue", &VUE),
         ];
         for (name, lang) in all {
             assert!(lang.config().is_some(), "{name} config failed to build");
@@ -561,6 +585,7 @@ mod tests {
         assert!(language_for_path("README.md").is_some());
         assert!(language_for_path("Program.cs").is_some());
         assert!(language_for_path("query.SQL").is_some()); // case-insensitive
+        assert!(language_for_path("components/App.vue").is_some());
         assert!(language_for_path("Makefile").is_none());
         assert!(language_for_path("logo.png").is_none());
         assert!(language_for_path(".gitignore").is_none());
@@ -618,10 +643,24 @@ mod tests {
     #[test]
     fn php_highlights() {
         let php = language_for_path("x.php").unwrap();
-        let lines = highlight_lines(php, "<?php\nfunction greet($name) {\n  return \"hi\";\n}");
-        // `function` keyword on line 1, string literal on line 2.
-        assert!(lines[1].iter().any(|&(_, t)| t == Token::Keyword));
-        assert!(lines[2].iter().any(|&(_, t)| t == Token::String));
+        // A *bare* PHP fragment with no `<?php` tag — this is what diff hunks
+        // contain. The `php_only` grammar must highlight it (the HTML-aware
+        // `php` grammar would treat it all as inline text and emit nothing).
+        let lines = highlight_lines(php, "function greet($name) {\n  return \"hi\";\n}");
+        // `function` keyword on line 0, string literal on line 1.
+        assert!(lines[0].iter().any(|&(_, t)| t == Token::Keyword));
+        assert!(lines[1].iter().any(|&(_, t)| t == Token::String));
+    }
+
+    #[test]
+    fn vue_highlights_template() {
+        let vue = language_for_path("App.vue").unwrap();
+        let lines = highlight_lines(vue, "<template>\n  <div v-if=\"ok\">{{ msg }}</div>\n</template>");
+        // The grammar tags template structure/tag names as @tag (-> Function).
+        assert!(
+            lines.iter().flatten().any(|&(_, t)| t == Token::Function),
+            "expected Vue template tags to highlight"
+        );
     }
 
     #[test]
