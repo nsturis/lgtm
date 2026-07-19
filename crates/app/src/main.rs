@@ -332,6 +332,9 @@ struct Cell {
 enum Row {
     Spacer,
     FileHeader {
+        /// Index into `PrDiff::files`, so clicking (to toggle viewed) knows
+        /// which file this header belongs to.
+        file_ix: usize,
         path: SharedString,
         old_path: Option<SharedString>,
         status: FileStatus,
@@ -342,6 +345,9 @@ enum Row {
         /// items even while comment rows are toggled off.
         comments: usize,
         outdated: usize,
+        /// Marked viewed: collapsed to just this header row (hunks, gaps,
+        /// and comment rows are skipped in `build_rows`), rendered dim + ✓.
+        viewed: bool,
     },
     HunkHeader {
         label: SharedString,
@@ -1220,7 +1226,15 @@ fn build_rows(
     comments: Option<&CommentIndex>,
     show_comments: bool,
 ) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
-    build_rows_impl(diff, mode, upgrades, comments, show_comments, None)
+    build_rows_impl(
+        diff,
+        mode,
+        upgrades,
+        comments,
+        show_comments,
+        None,
+        &HashSet::new(),
+    )
 }
 
 /// Per-(file, hunk) memo of `hunk_syntax`'s output, so rebuilding the rows
@@ -1233,7 +1247,8 @@ fn build_rows(
 type HunkSyntaxCache = HashMap<(usize, usize), Vec<Vec<(Range<usize>, syntax::Token)>>>;
 
 /// Same as `build_rows`, but reusing/populating `cache` for non-upgraded
-/// hunks' syntax spans instead of recomputing them every time.
+/// hunks' syntax spans instead of recomputing them every time, and collapsing
+/// files in `viewed` (by `file_ix`) to just their header row.
 fn build_rows_cached(
     diff: &PrDiff,
     mode: ViewMode,
@@ -1241,8 +1256,17 @@ fn build_rows_cached(
     comments: Option<&CommentIndex>,
     show_comments: bool,
     cache: &mut HunkSyntaxCache,
+    viewed: &HashSet<usize>,
 ) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
-    build_rows_impl(diff, mode, upgrades, comments, show_comments, Some(cache))
+    build_rows_impl(
+        diff,
+        mode,
+        upgrades,
+        comments,
+        show_comments,
+        Some(cache),
+        viewed,
+    )
 }
 
 fn build_rows_impl(
@@ -1252,6 +1276,7 @@ fn build_rows_impl(
     comments: Option<&CommentIndex>,
     show_comments: bool,
     mut cache: Option<&mut HunkSyntaxCache>,
+    viewed: &HashSet<usize>,
 ) -> (Vec<Row>, Vec<usize>, Vec<usize>) {
     let mut rows = Vec::new();
     let mut file_rows = Vec::new();
@@ -1274,7 +1299,9 @@ fn build_rows_impl(
             rows.push(Row::Spacer);
         }
         file_rows.push(rows.len());
+        let is_viewed = viewed.contains(&file_ix);
         rows.push(Row::FileHeader {
+            file_ix,
             path: path.to_string().into(),
             old_path: match file.status {
                 FileStatus::Renamed => file.old_path.clone().map(Into::into),
@@ -1285,7 +1312,12 @@ fn build_rows_impl(
             deletions: file.deletions,
             comments: n_comments,
             outdated: n_outdated,
+            viewed: is_viewed,
         });
+        if is_viewed {
+            // Collapsed: just the header, no hunks/gaps/comment rows.
+            continue;
+        }
         if file.status == FileStatus::Binary {
             rows.push(Row::Binary);
             continue;
@@ -1784,6 +1816,7 @@ fn render_row(
                 .into_any_element()
         }
         Row::FileHeader {
+            file_ix,
             path,
             old_path,
             status,
@@ -1791,10 +1824,14 @@ fn render_row(
             deletions,
             comments,
             outdated,
+            viewed,
         } => {
             let (status_label, status_color) = status_style(*status);
             let status: Hsla = status_color.into();
+            let (file_ix, viewed) = (*file_ix, *viewed);
+            let entity = entity.clone();
             let mut header = div()
+                .id(("file-header", file_ix))
                 .h(row_height)
                 .w_full()
                 .flex()
@@ -1802,6 +1839,18 @@ fn render_row(
                 .gap_3()
                 .px_3()
                 .bg(theme::mantle())
+                .cursor_pointer()
+                .when(viewed, |row| row.opacity(0.55))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.toggle_viewed(file_ix, cx));
+                })
+                .child(
+                    div()
+                        .w(px(14.))
+                        .flex_shrink_0()
+                        .text_color(theme::green())
+                        .child(SharedString::from(if viewed { "✓" } else { "" })),
+                )
                 .child(
                     Tag::custom(status.opacity(0.15), status, status.opacity(0.4))
                         .small()
@@ -2735,6 +2784,7 @@ impl ItemData {
             self.comments.as_ref(),
             self.comments_visible,
             &mut self.hunk_syntax_cache,
+            &self.viewed,
         );
         self.set_rows(built);
         self.selection = None;
@@ -2886,23 +2936,35 @@ impl ReviewItem {
                     Some(local) => Some(local.index()),
                     None => comments,
                 };
-                if data.local_review.is_some() || data.mode != mode || !data.comments_visible {
-                    // Background rows assumed the fetched comments. Local
-                    // drafts are reattached here, and view/comment toggles may
-                    // have changed while the refresh ran.
+                // Swap in the fresh diff (and re-key/re-resolve viewed state
+                // against it — the base/branch may have moved for a local
+                // item, and files may have changed) before any rebuild below
+                // so a collapsed-viewed-file rebuild sees the current set.
+                data.diff = diff;
+                data.review_id = review_id(&self.source);
+                data.resolve_viewed(store);
+                if data.local_review.is_some()
+                    || data.mode != mode
+                    || !data.comments_visible
+                    || !data.viewed.is_empty()
+                {
+                    // Background rows assumed the fetched comments and no
+                    // viewed files. Local drafts are reattached here, view/
+                    // comment toggles may have changed while the refresh
+                    // ran, and any viewed files need to render collapsed.
                     (rows, file_rows, hunk_rows) = build_rows_cached(
-                        &diff,
+                        &data.diff,
                         data.mode,
                         &data.upgrades,
                         data.comments.as_ref(),
                         data.comments_visible,
                         &mut data.hunk_syntax_cache,
+                        &data.viewed,
                     );
                 }
                 if pr_meta.is_some() {
                     data.pr_meta = pr_meta;
                 }
-                data.diff = diff;
                 data.patch = patch;
                 data.set_rows((rows, file_rows, hunk_rows));
                 data.cursor = data.cursor.min(data.rows.len().saturating_sub(1));
@@ -2910,10 +2972,6 @@ impl ReviewItem {
                 data.deletions = deletions;
                 data.selection = None;
                 data.rebuild_tree();
-                // The base/branch may have moved (local refresh) and files may
-                // have changed since — re-key and re-resolve viewed state.
-                data.review_id = review_id(&self.source);
-                data.resolve_viewed(store);
             }
             _ => {
                 let minimap = minimap_rows(&rows);
@@ -4924,6 +4982,7 @@ impl ReviewApp {
                     data.comments.as_ref(),
                     data.comments_visible,
                     &mut data.hunk_syntax_cache,
+                    &data.viewed,
                 );
                 data.set_rows(built);
                 data.cursor = data.cursor.min(data.rows.len().saturating_sub(1));
@@ -5080,6 +5139,7 @@ impl ReviewApp {
             data.comments.as_ref(),
             data.comments_visible,
             &mut data.hunk_syntax_cache,
+            &data.viewed,
         );
         data.set_rows(built);
         // The gap row is replaced by its hidden context rows (plus any
@@ -5101,6 +5161,32 @@ impl ReviewApp {
                     .set_offset(point(offset.x, offset.y - px(inserted as f32 * ROW_HEIGHT)));
             }
         }
+        cx.notify();
+    }
+
+    /// Flip `file_ix`'s viewed state for the active item: update
+    /// `ItemData::viewed`, persist to the store, and rebuild the collapsed/
+    /// expanded rows and tree.
+    fn toggle_viewed(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+        let Some(data) = self.active_data_mut() else {
+            return;
+        };
+        let Some(file) = data.diff.files.get(file_ix) else {
+            return;
+        };
+        let sig = file_signature(file);
+        let path = file.display_path().to_string();
+        let now_viewed = if data.viewed.remove(&file_ix) {
+            false
+        } else {
+            data.viewed.insert(file_ix);
+            true
+        };
+        let review_id = data.review_id.clone();
+        data.rebuild_rows_anchored();
+        data.rebuild_tree();
+        self.store.set_viewed(&review_id, &path, sig, now_viewed);
+        self.save_store();
         cx.notify();
     }
 
@@ -5709,6 +5795,7 @@ impl ReviewApp {
             data.comments.as_ref(),
             data.comments_visible,
             &mut data.hunk_syntax_cache,
+            &data.viewed,
         );
         data.set_rows(built);
         let target = file_pos
@@ -9587,6 +9674,7 @@ index 0000000..1111111 100644
             None,
             false,
             &mut cache,
+            &HashSet::new(),
         );
         assert_eq!(
             cache.len(),
@@ -9617,6 +9705,7 @@ index 0000000..1111111 100644
             None,
             false,
             &mut cache,
+            &HashSet::new(),
         );
         let spans2: Vec<_> = rows2
             .iter()
@@ -10080,6 +10169,49 @@ index 0000000..1111111 100644
             .count();
         assert_eq!(unified_lines, 11);
         assert_eq!(split_lines, 8); // 4 (hunk 1) + 4 (hunk 2)
+    }
+
+    #[test]
+    fn build_rows_collapses_viewed_files_to_their_header() {
+        let diff = sample_diff();
+        let mut cache = HashMap::new();
+        let mut viewed = HashSet::new();
+        viewed.insert(0); // a.rs, the non-binary file with hunks
+        let (rows, file_rows, hunk_rows) = build_rows_cached(
+            &diff,
+            ViewMode::Unified,
+            &HashMap::new(),
+            None,
+            true,
+            &mut cache,
+            &viewed,
+        );
+        assert_eq!(file_rows.len(), 2, "one header row per file, viewed or not");
+        // Viewed file 0: only its header, no hunk headers, no line rows, and
+        // it's marked viewed.
+        match &rows[file_rows[0]] {
+            Row::FileHeader {
+                file_ix, viewed, ..
+            } => {
+                assert_eq!(*file_ix, 0);
+                assert!(viewed);
+            }
+            other => panic!("expected file header, got {}", row_name(other)),
+        }
+        assert_eq!(hunk_rows.len(), 0, "file 1 is binary, no hunks anywhere");
+        assert!(!rows[..file_rows[1]]
+            .iter()
+            .any(|r| matches!(r, Row::HunkHeader { .. } | Row::Line { .. })));
+        // The very next row after file 0's header is file 1's header (a
+        // Spacer separates them) — no Binary row leaked through for file 0.
+        assert!(matches!(rows[file_rows[0] + 1], Row::Spacer));
+        assert_eq!(file_rows[0] + 2, file_rows[1]);
+        // File 1 (unviewed, binary) still gets its Binary row.
+        match &rows[file_rows[1]] {
+            Row::FileHeader { viewed, .. } => assert!(!viewed),
+            other => panic!("expected file header, got {}", row_name(other)),
+        }
+        assert!(matches!(rows[file_rows[1] + 1], Row::Binary));
     }
 
     fn line(text: &str) -> Row {
