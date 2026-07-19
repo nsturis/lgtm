@@ -2510,9 +2510,51 @@ enum TreeListRow {
     FilteredFile(usize),
 }
 
+/// A leading ✓ hit-target that toggles `file_ix`'s viewed state on click,
+/// filled/dim when viewed. Stops the click from bubbling to the row's own
+/// `on_click` (jump-to-file), so clicking it only toggles.
+fn viewed_checkbox(
+    file_ix: usize,
+    viewed: bool,
+    entity: gpui::Entity<ReviewApp>,
+) -> impl IntoElement {
+    div()
+        .id(("tree-viewed", file_ix))
+        .w(px(12.))
+        .flex_shrink_0()
+        .cursor_pointer()
+        .text_color(if viewed {
+            theme::green()
+        } else {
+            theme::overlay0()
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            entity.update(cx, |this, cx| this.toggle_viewed(file_ix, cx));
+        })
+        .child(SharedString::from(if viewed { "✓" } else { "" }))
+}
+
+/// A small dot shown when `path` has anchored review comments.
+fn comment_dot(data: &ItemData, path: &str) -> Option<impl IntoElement> {
+    let has_comments = data
+        .comments
+        .as_ref()
+        .and_then(|index| index.counts.get(path))
+        .is_some_and(|&(n, _)| n > 0);
+    has_comments.then(|| {
+        div()
+            .w(px(6.))
+            .h(px(6.))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(theme::blue())
+    })
+}
+
 /// `current` marks the file the diff viewport is showing (surface0, like the
 /// active sidebar item). Clicking a dir toggles collapse; clicking a file
-/// jumps the diff to its header.
+/// jumps the diff to its header; the leading ✓ toggles viewed instead.
 fn render_tree_row(
     row: TreeListRow,
     pos: usize,
@@ -2538,7 +2580,6 @@ fn render_tree_row(
                     .child(SharedString::from(format!("−{}", file.deletions))),
             )
     };
-    let entity = entity.clone();
     let base = div()
         .id(("tree-row", pos))
         .h(px(TREE_ROW_HEIGHT))
@@ -2556,8 +2597,11 @@ fn render_tree_row(
         TreeListRow::Entry(entry_ix) => {
             let entry = &data.tree[entry_ix];
             let indent = px(8. + entry.depth as f32 * 12.);
-            let base = base.pl(indent).on_click(move |_, window, cx| {
-                entity.update(cx, |this, cx| this.tree_entry_clicked(entry_ix, window, cx));
+            let base = base.pl(indent).on_click({
+                let entity = entity.clone();
+                move |_, window, cx| {
+                    entity.update(cx, |this, cx| this.tree_entry_clicked(entry_ix, window, cx));
+                }
             });
             match &entry.kind {
                 TreeEntryKind::Dir { path } => {
@@ -2583,8 +2627,11 @@ fn render_tree_row(
                     .into_any_element()
                 }
                 TreeEntryKind::File { file_ix } => {
-                    let file = &data.diff.files[*file_ix];
-                    base.child(div().w(px(12.)).flex_shrink_0()) // aligns with dir chevrons
+                    let file_ix = *file_ix;
+                    let file = &data.diff.files[file_ix];
+                    let viewed = data.viewed.contains(&file_ix);
+                    base.when(viewed, |row| row.opacity(0.6))
+                        .child(viewed_checkbox(file_ix, viewed, entity.clone()))
                         .child(
                             div()
                                 .flex_1()
@@ -2593,6 +2640,7 @@ fn render_tree_row(
                                 .text_color(status_style(file.status).1)
                                 .child(entry.name.clone()),
                         )
+                        .children(comment_dot(data, file.display_path()))
                         .child(stats(file))
                         .into_any_element()
                 }
@@ -2600,10 +2648,16 @@ fn render_tree_row(
         }
         TreeListRow::FilteredFile(file_ix) => {
             let file = &data.diff.files[file_ix];
+            let viewed = data.viewed.contains(&file_ix);
             base.pl_2()
-                .on_click(move |_, window, cx| {
-                    entity.update(cx, |this, cx| this.jump_to_file(file_ix, window, cx));
+                .when(viewed, |row| row.opacity(0.6))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| this.jump_to_file(file_ix, window, cx));
+                    }
                 })
+                .child(viewed_checkbox(file_ix, viewed, entity.clone()))
                 .child(
                     div()
                         .flex_1()
@@ -2612,6 +2666,7 @@ fn render_tree_row(
                         .text_color(status_style(file.status).1)
                         .child(SharedString::from(file.display_path().to_string())),
                 )
+                .children(comment_dot(data, file.display_path()))
                 .child(stats(file))
                 .into_any_element()
         }
