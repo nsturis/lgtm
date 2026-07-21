@@ -177,6 +177,21 @@ fn recover_login_shell_path() {
     }
 }
 
+/// Parse a launch arg — or a URL macOS hands us via `on_open_urls` when a
+/// folder is opened into the already-running app — into a review source. A
+/// directory becomes a local diff; anything else is treated as a PR arg.
+fn resolve_source_arg(arg: &str) -> anyhow::Result<Source> {
+    let arg = arg.strip_prefix("file://").unwrap_or(arg);
+    // Trailing slash on a folder URL (file:///path/) is harmless for is_dir
+    // but confuses git; strip it except for the root.
+    let arg = arg.strip_suffix('/').filter(|s| !s.is_empty()).unwrap_or(arg);
+    if Path::new(arg).is_dir() {
+        git::resolve_local(Path::new(arg)).map(Source::Local)
+    } else {
+        gh::resolve_pr_arg(arg).map(Source::Pr)
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let [mode, root] = args.as_slice() {
@@ -199,12 +214,7 @@ fn main() {
         }
     } else {
         for arg in &args {
-            let parsed = if Path::new(arg).is_dir() {
-                git::resolve_local(Path::new(arg)).map(Source::Local)
-            } else {
-                gh::resolve_pr_arg(arg).map(Source::Pr)
-            };
-            match parsed {
+            match resolve_source_arg(arg) {
                 Ok(source) => sources.push(source),
                 Err(err) => {
                     eprintln!("error: {arg}: {err:#}");
@@ -214,9 +224,45 @@ fn main() {
         }
     }
 
-    Application::new()
-        .with_assets(gpui_component_assets::Assets)
-        .run(move |cx: &mut App| {
+    // Shared slots to the one window's ReviewApp and an AsyncApp, so the
+    // `on_open_urls` handler (registered on the Application, fired with no cx)
+    // can push freshly-opened worktrees/PRs as tabs into the running instance
+    // instead of the caller spawning a second process.
+    let review: Rc<RefCell<Option<gpui::Entity<ReviewApp>>>> = Rc::new(RefCell::new(None));
+    let async_slot: Rc<RefCell<Option<gpui::AsyncApp>>> = Rc::new(RefCell::new(None));
+
+    let app = Application::new().with_assets(gpui_component_assets::Assets);
+    {
+        let review = review.clone();
+        let async_slot = async_slot.clone();
+        // macOS delivers `open -a LGTM <folder>` on the live instance here.
+        app.on_open_urls(move |urls| {
+            let (Some(view), Some(async_cx)) =
+                (review.borrow().clone(), async_slot.borrow().clone())
+            else {
+                return;
+            };
+            let _ = async_cx.update(|cx| {
+                let mut opened = false;
+                for url in urls {
+                    match resolve_source_arg(&url) {
+                        Ok(source) => {
+                            view.update(cx, |app, cx| app.open_item(source, cx));
+                            opened = true;
+                        }
+                        Err(err) => eprintln!("lgtm: {url}: {err:#}"),
+                    }
+                }
+                if opened {
+                    cx.activate(true);
+                }
+            });
+        });
+    }
+
+    let review_slot = review;
+    app.run(move |cx: &mut App| {
+            *async_slot.borrow_mut() = Some(cx.to_async());
             gpui_component::init(cx);
             theme::apply_ui_theme(cx);
             cx.bind_keys([
@@ -286,6 +332,7 @@ fn main() {
             .detach();
 
             let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
+            let review_slot = review_slot.clone();
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -295,9 +342,10 @@ fn main() {
                     }),
                     ..Default::default()
                 },
-                |window, cx| {
+                move |window, cx| {
                     let view = cx.new(|cx| ReviewApp::new(sources, errors, window, cx));
                     window.focus(&view.read(cx).focus_handle);
+                    *review_slot.borrow_mut() = Some(view.clone());
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )
