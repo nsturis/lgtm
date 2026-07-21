@@ -112,6 +112,12 @@ pub struct PrMeta {
     /// required reviews and none given).
     #[serde(default)]
     pub review_decision: String,
+    /// GitHub's own merge check: "MERGEABLE", "CONFLICTING", or "UNKNOWN"
+    /// (computed lazily server-side, so "UNKNOWN" until GitHub answers). We
+    /// only render a badge for it — lgtm's diff is base-vs-head and can't
+    /// surface conflicts against the current base tip on its own.
+    #[serde(default)]
+    pub mergeable: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -128,7 +134,7 @@ pub fn fetch_meta(loc: &PrLocator) -> Result<PrMeta> {
         &loc.repo_slug(),
         "--json",
         "number,title,author,state,url,body,baseRefName,headRefName,baseRefOid,headRefOid,\
-         additions,deletions,changedFiles,reviewDecision",
+         additions,deletions,changedFiles,reviewDecision,mergeable",
     ])?;
     serde_json::from_str(&json).context("unexpected gh pr view JSON")
 }
@@ -662,17 +668,23 @@ mod tests {
             "url": "https://github.com/o/r/pull/1",
             "baseRefName": "main", "headRefName": "feat",
             "baseRefOid": "abc123", "headRefOid": "def456",
-            "additions": 1, "deletions": 2, "changedFiles": 3, "reviewDecision": "CHANGES_REQUESTED"
+            "additions": 1, "deletions": 2, "changedFiles": 3, "reviewDecision": "CHANGES_REQUESTED",
+            "mergeable": "CONFLICTING"
         }"#;
         let meta: PrMeta = serde_json::from_str(json).unwrap();
         assert_eq!(meta.base_ref_oid, "abc123");
         assert_eq!(meta.head_ref_oid, "def456");
         assert_eq!(meta.review_decision, "CHANGES_REQUESTED");
+        assert_eq!(meta.mergeable, "CONFLICTING");
 
-        // Older gh output without the field still deserializes.
-        let json = json.replace(r#", "reviewDecision": "CHANGES_REQUESTED""#, "");
+        // Older gh output without the fields still deserializes.
+        let json = json
+            .replace(r#", "reviewDecision": "CHANGES_REQUESTED""#, "")
+            .replace(r#",
+            "mergeable": "CONFLICTING""#, "");
         let meta: PrMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(meta.review_decision, "");
+        assert_eq!(meta.mergeable, "");
     }
 
     #[test]

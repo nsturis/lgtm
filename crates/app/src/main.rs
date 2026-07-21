@@ -3637,6 +3637,12 @@ fn pr_titlebar_content(meta: &gh::PrMeta, cx: &mut Context<ReviewApp>) -> gpui::
         "CHANGES_REQUESTED" => Some((theme::red(), "changes requested")),
         _ => None,
     };
+    // GitHub's server-side merge check against the current base tip; lgtm's
+    // own base-vs-head diff can't detect this, so mirror GitHub's answer.
+    let mergeability = match meta.mergeable.as_str() {
+        "CONFLICTING" => Some((theme::red(), "conflicts")),
+        _ => None,
+    };
     let url = meta.url.clone();
     div()
         .flex()
@@ -3673,6 +3679,14 @@ fn pr_titlebar_content(meta: &gh::PrMeta, cx: &mut Context<ReviewApp>) -> gpui::
                         .child(SharedString::from(format!("by {}", meta.author.login))),
                 )
                 .when_some(decision, |row, (color, label)| {
+                    let tint: Hsla = color.into();
+                    row.child(
+                        Tag::custom(tint.opacity(0.15), tint, tint.opacity(0.4))
+                            .small()
+                            .child(SharedString::from(label.to_string())),
+                    )
+                })
+                .when_some(mergeability, |row, (color, label)| {
                     let tint: Hsla = color.into();
                     row.child(
                         Tag::custom(tint.opacity(0.15), tint, tint.opacity(0.4))
@@ -11963,6 +11977,7 @@ index 0000000..1111111 100644
             deletions: 2,
             changed_files: 3,
             review_decision: String::new(),
+            mergeable: String::new(),
         };
         let header = pr_chat_header(&meta);
         assert!(header.contains("\"Fix the frobnicator\""));
