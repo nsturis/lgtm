@@ -7876,6 +7876,54 @@ impl ReviewApp {
         )
     }
 
+    /// The current file's header, pinned to the top of the diff pane once its
+    /// real header row has scrolled out of view — so you always see which file
+    /// you're in while paging through hunks. Slides up as the next file's real
+    /// header reaches the top, handing off seamlessly. `None` while the real
+    /// header is still on screen (avoids drawing it twice).
+    fn render_sticky_header(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.palette.is_some() {
+            return None;
+        }
+        let data = self.active_data()?;
+        if data.rows.is_empty() || data.file_rows.is_empty() {
+            return None;
+        }
+        let (bounds, offset) = {
+            let state = data.scroll.0.borrow();
+            (state.base_handle.bounds(), state.base_handle.offset())
+        };
+        // No painted bounds yet (first frame): nothing to pin against.
+        if f32::from(bounds.size.height) <= 0. {
+            return None;
+        }
+        // Topmost row whose top edge sits at or above the pane top. offset.y is
+        // negative when scrolled down.
+        let top = ((-f32::from(offset.y) / ROW_HEIGHT).floor().max(0.) as usize)
+            .min(data.rows.len() - 1);
+        let hi = data.file_rows.iter().rposition(|&h| h <= top)?;
+        let header_ix = data.file_rows[hi];
+        // Real header still on screen → let it speak for itself.
+        if header_ix as f32 * ROW_HEIGHT + f32::from(offset.y) >= 0. {
+            return None;
+        }
+        // Push up so the next file's incoming real header takes over cleanly.
+        let sticky_top = data.file_rows.get(hi + 1).map_or(0., |&next| {
+            (next as f32 * ROW_HEIGHT + f32::from(offset.y) - ROW_HEIGHT).min(0.)
+        });
+        let row = data.rows.get(header_ix)?;
+        let entity = cx.entity();
+        Some(
+            div()
+                .absolute()
+                .top(px(sticky_top))
+                .left_0()
+                .right_0()
+                .child(render_row(header_ix, row, None, &entity))
+                .into_any_element(),
+        )
+    }
+
     /// The floating composer card: absolutely positioned at root level (so
     /// its input sits outside the "ReviewApp" key context and plain letters
     /// stay text), anchored near the target line's y, clamped into the pane.
@@ -9225,6 +9273,12 @@ impl Render for ReviewApp {
                     .font_family(MONO)
                     .text_size(px(TEXT_SIZE))
                     .line_height(px(ROW_HEIGHT))
+                    // Scrolling the list doesn't mark this view dirty, so the
+                    // sticky file header (computed in render from the scroll
+                    // offset) would lag until the next unrelated notify. Redraw
+                    // on wheel to keep it tracking. Doesn't consume the event —
+                    // the list still scrolls.
+                    .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| cx.notify()))
                     // Selection mouse listeners live on the diff pane only.
                     // While the palette is open its occluding backdrop keeps
                     // this hitbox from being hovered, so none of these fire;
@@ -9301,34 +9355,46 @@ impl Render for ReviewApp {
                         }),
                     )
                     .child(
-                        uniform_list("diff", data.rows.len(), move |range, _window, cx| {
-                            let this = entity.read(cx);
-                            match this.active_data() {
-                                Some(data) => {
-                                    let sel = data.selection;
-                                    range
-                                        .filter_map(|ix| data.rows.get(ix).map(|row| (ix, row)))
-                                        .map(|(ix, row)| {
-                                            let row_sel = sel.and_then(|sel| {
-                                                row_selection_range(&sel, ix, row)
-                                                    .filter(|range| !range.is_empty())
-                                                    .map(|range| (sel.side, range))
-                                            });
-                                            render_row(ix, row, row_sel, &entity)
-                                        })
-                                        .collect()
-                                }
-                                None => Vec::new(),
-                            }
-                        })
-                        .track_scroll(data.scroll.clone())
-                        .with_horizontal_sizing_behavior(match data.mode {
-                            ViewMode::Unified => ListHorizontalSizingBehavior::Unconstrained,
-                            ViewMode::Split => ListHorizontalSizingBehavior::FitList,
-                        })
-                        .h_full()
-                        .flex_1()
-                        .min_w_0(),
+                        // Wrapper owns the list column's box so the sticky file
+                        // header can overlay exactly it (not the minimap/scrollbar).
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(
+                                uniform_list("diff", data.rows.len(), move |range, _window, cx| {
+                                    let this = entity.read(cx);
+                                    match this.active_data() {
+                                        Some(data) => {
+                                            let sel = data.selection;
+                                            range
+                                                .filter_map(|ix| {
+                                                    data.rows.get(ix).map(|row| (ix, row))
+                                                })
+                                                .map(|(ix, row)| {
+                                                    let row_sel = sel.and_then(|sel| {
+                                                        row_selection_range(&sel, ix, row)
+                                                            .filter(|range| !range.is_empty())
+                                                            .map(|range| (sel.side, range))
+                                                    });
+                                                    render_row(ix, row, row_sel, &entity)
+                                                })
+                                                .collect()
+                                        }
+                                        None => Vec::new(),
+                                    }
+                                })
+                                .track_scroll(data.scroll.clone())
+                                .with_horizontal_sizing_behavior(match data.mode {
+                                    ViewMode::Unified => ListHorizontalSizingBehavior::Unconstrained,
+                                    ViewMode::Split => ListHorizontalSizingBehavior::FitList,
+                                })
+                                .size_full(),
+                            )
+                            .when_some(self.render_sticky_header(cx), |col, header| {
+                                col.child(header)
+                            }),
                     )
                     // Between the list and the Scrollbar, which paints over
                     // the column's right edge. Nothing is mounted when hidden
