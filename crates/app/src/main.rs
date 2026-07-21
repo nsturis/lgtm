@@ -268,12 +268,12 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("]", NextFile, Some("ReviewApp")),
                 KeyBinding::new("[", PrevFile, Some("ReviewApp")),
-                KeyBinding::new("shift-v", ToggleViewed, Some("ReviewApp")),
+                KeyBinding::new("v", ToggleViewed, Some("ReviewApp")),
                 KeyBinding::new("n", NextHunk, Some("ReviewApp")),
                 KeyBinding::new("p", PrevHunk, Some("ReviewApp")),
                 KeyBinding::new("home", GoToTop, Some("ReviewApp")),
                 KeyBinding::new("end", GoToBottom, Some("ReviewApp")),
-                KeyBinding::new("v", ToggleView, Some("ReviewApp")),
+                KeyBinding::new("shift-v", ToggleView, Some("ReviewApp")),
                 KeyBinding::new("m", ToggleMinimap, Some("ReviewApp")),
                 KeyBinding::new("w", ToggleWrap, Some("ReviewApp")),
                 KeyBinding::new("cmd-shift-s", CaptureScreenshot, Some("ReviewApp")),
@@ -5579,12 +5579,13 @@ impl ReviewApp {
     /// Flip `file_ix`'s viewed state for the active item: update
     /// `ItemData::viewed`, persist to the store, and rebuild the collapsed/
     /// expanded rows and tree.
-    fn toggle_viewed(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+    /// Returns whether the file is now marked viewed (vs. un-viewed).
+    fn toggle_viewed(&mut self, file_ix: usize, cx: &mut Context<Self>) -> bool {
         let Some(data) = self.active_data_mut() else {
-            return;
+            return false;
         };
         let Some(file) = data.diff.files.get(file_ix) else {
-            return;
+            return false;
         };
         let sig = file_signature(file);
         let path = file.display_path().to_string();
@@ -5600,6 +5601,7 @@ impl ReviewApp {
         self.store.set_viewed(&review_id, &path, sig, now_viewed);
         self.save_store();
         cx.notify();
+        now_viewed
     }
 
     fn submit_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -9269,11 +9271,11 @@ impl ReviewApp {
             .text_size(px(12.))
             .child(hint(&["]", "["], "files"))
             .child(hint(&["n", "p"], "hunks"))
-            .child(hint(&["v"], "unified/split"))
+            .child(hint(&["shift-v"], "unified/split"))
             .child(hint(&["w"], "wrap"))
             .child(hint(&["m"], "minimap"))
             .child(hint(&["c"], "comments"))
-            .child(hint(&["shift-v"], "viewed"))
+            .child(hint(&["v"], "viewed"))
             .child(hint(&["/"], "filter files"))
             .child(hint(&["home", "end"], "top/bottom"))
             .child(hint(&["cmd-k"], "palette"))
@@ -9520,8 +9522,19 @@ impl Render for ReviewApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleViewed, _, cx| {
-                if let Some(file_ix) = this.active_file_ix() {
-                    this.toggle_viewed(file_ix, cx);
+                let Some(file_ix) = this.active_file_ix() else {
+                    return;
+                };
+                // Marking viewed collapses the file, so advance to the next
+                // file still needing a look (matches `]`). Un-viewing stays put.
+                if this.toggle_viewed(file_ix, cx) {
+                    if let Some(data) = this.active_data() {
+                        if let Some(target) =
+                            next_unviewed_target(&data.file_rows, &data.viewed, data.cursor)
+                        {
+                            this.jump(target, cx);
+                        }
+                    }
                 }
             }))
             .on_action(cx.listener(|this, _: &NextHunk, _, cx| {
