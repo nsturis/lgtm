@@ -22,6 +22,23 @@ Stacked — each needs the ones above it landed first:
 9. **mark-as-viewed** — viewed collapse + richer tree (needs `store.rs` from #8 and `build_rows_cached` from #7).
 10. **batched-comments** — pending PR review drafts + one-call submit (needs the perf build path from #7).
 11. **footer-keymap** — surfaces keys added across #4/#6/#9 + screenshot (needs those keys to exist).
+12. **conflict-badge** — red "conflicts" tag in the PR titlebar from `gh pr view`'s
+    `mergeable` (`crates/gh`, `main.rs`). Needs the PR titlebar / review-decision
+    baseline (from #8). Commit `178b62d`.
+13. **single-instance-tabs** — `on_open_urls` opens folders as tabs in the running
+    app + `public.folder` doc type in `release.yml`'s bundle plist (`main.rs`).
+    Needs the multi-tab `open_item` infra (from #8). Pushing the workflow file
+    needs `workflow` scope (like #5). Commit `4a0e787`.
+14. **sticky-file-header** — pin the current file's header to the top of the diff
+    while scrolling; redraw-on-wheel (`main.rs`). Reuses `render_row`'s FileHeader,
+    so needs the viewed/comments fields from #9 + #10 and the render baseline.
+    Commit `4134a6d`.
+
+Amendments to existing buckets (fold in when those are cut, not a standalone PR):
+- **viewed-advance + key swap** (`8a2699d`) — `v` marks viewed & advances to the
+  next unviewed file, `shift-v` toggles view. The `toggle_viewed`/advance parts
+  belong with #9 **mark-as-viewed**; the footer-hint swap belongs with #11
+  **footer-keymap**.
 
 ## Existing fork branches (snapshots; may drift from custom)
 - `feat/language-support`, `fix/finder-launch-path`, `feat/resizable-sidebar`,
