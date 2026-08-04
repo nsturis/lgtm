@@ -216,7 +216,10 @@ fn resolve_source_arg(arg: &str) -> anyhow::Result<Source> {
     let arg = arg.strip_prefix("file://").unwrap_or(arg);
     // Trailing slash on a folder URL (file:///path/) is harmless for is_dir
     // but confuses git; strip it except for the root.
-    let arg = arg.strip_suffix('/').filter(|s| !s.is_empty()).unwrap_or(arg);
+    let arg = arg
+        .strip_suffix('/')
+        .filter(|s| !s.is_empty())
+        .unwrap_or(arg);
     if Path::new(arg).is_dir() {
         git::resolve_local(Path::new(arg)).map(Source::Local)
     } else {
@@ -294,102 +297,102 @@ fn main() {
 
     let review_slot = review;
     app.run(move |cx: &mut App| {
-            *async_slot.borrow_mut() = Some(cx.to_async());
-            gpui_component::init(cx);
-            theme::apply_ui_theme(cx);
-            cx.bind_keys([
-                KeyBinding::new("]", NextFile, Some("ReviewApp")),
-                KeyBinding::new("[", PrevFile, Some("ReviewApp")),
-                KeyBinding::new("v", ToggleViewed, Some("ReviewApp")),
-                KeyBinding::new("n", NextHunk, Some("ReviewApp")),
-                KeyBinding::new("p", PrevHunk, Some("ReviewApp")),
-                KeyBinding::new("home", GoToTop, Some("ReviewApp")),
-                KeyBinding::new("end", GoToBottom, Some("ReviewApp")),
-                KeyBinding::new("shift-v", ToggleView, Some("ReviewApp")),
-                KeyBinding::new("m", ToggleMinimap, Some("ReviewApp")),
-                KeyBinding::new("w", ToggleWrap, Some("ReviewApp")),
-                KeyBinding::new("cmd-shift-s", CaptureScreenshot, Some("ReviewApp")),
-                KeyBinding::new("c", ToggleComments, Some("ReviewApp")),
-                KeyBinding::new("r", Refresh, Some("ReviewApp")),
-                // Finish the review: approve / request changes / comment.
-                KeyBinding::new("cmd-enter", SubmitReview, Some("ReviewApp")),
-                // Only while the diff pane has focus; typing `/` in any input
-                // stays a plain character.
-                KeyBinding::new("/", FocusTreeFilter, Some("ReviewApp")),
-                // Selection: escape/cmd-c only fire while the diff pane has
-                // focus; with the palette open its input has focus, so the
-                // palette's own escape routing wins by construction.
-                KeyBinding::new("escape", ClearSelection, Some("ReviewApp")),
-                KeyBinding::new("cmd-c", CopySelection, Some("ReviewApp")),
-                KeyBinding::new("f12", GoToDefinition, Some("ReviewApp")),
-                KeyBinding::new("ctrl-tab", NextItem, Some("ReviewApp")),
-                KeyBinding::new("ctrl-shift-tab", PrevItem, Some("ReviewApp")),
-                KeyBinding::new("cmd-left", NavBack, Some("ReviewApp")),
-                KeyBinding::new("cmd-right", NavForward, Some("ReviewApp")),
-                KeyBinding::new("alt-left", NavBack, Some("ReviewApp")),
-                KeyBinding::new("alt-right", NavForward, Some("ReviewApp")),
-                KeyBinding::new("cmd-1", GoToItem1, Some("ReviewApp")),
-                KeyBinding::new("cmd-2", GoToItem2, Some("ReviewApp")),
-                KeyBinding::new("cmd-3", GoToItem3, Some("ReviewApp")),
-                KeyBinding::new("cmd-4", GoToItem4, Some("ReviewApp")),
-                KeyBinding::new("cmd-5", GoToItem5, Some("ReviewApp")),
-                KeyBinding::new("cmd-6", GoToItem6, Some("ReviewApp")),
-                KeyBinding::new("cmd-7", GoToItem7, Some("ReviewApp")),
-                KeyBinding::new("cmd-8", GoToItem8, Some("ReviewApp")),
-                KeyBinding::new("cmd-9", GoToItem9, Some("ReviewApp")),
-                // Zoom. Bind both "cmd-=" and "cmd-+" so it fires with or
-                // without shift, the way browsers and editors behave.
-                KeyBinding::new("cmd-=", ZoomIn, None),
-                KeyBinding::new("cmd-+", ZoomIn, None),
-                KeyBinding::new("cmd--", ZoomOut, None),
-                KeyBinding::new("cmd-0", ZoomReset, None),
-                // Global (None context): must work while the open input is focused.
-                KeyBinding::new("cmd-b", ToggleSidebar, None),
-                KeyBinding::new("cmd-j", ToggleChat, None),
-                KeyBinding::new("cmd-t", OpenInput, None),
-                KeyBinding::new("cmd-w", CloseItem, None),
-                KeyBinding::new("cmd-k", OpenPalette, None),
-                KeyBinding::new("cmd-q", Quit, None),
-                // Palette navigation. The `Palette > Input` variants are bound
-                // after gpui_component::init, so at the input's dispatch depth
-                // they take precedence over the Input's own up/down (which a
-                // single-line input consumes without propagating).
-                KeyBinding::new("up", PaletteUp, Some("Palette")),
-                KeyBinding::new("down", PaletteDown, Some("Palette")),
-                KeyBinding::new("escape", PaletteBack, Some("Palette")),
-                KeyBinding::new("up", PaletteUp, Some("Palette > Input")),
-                KeyBinding::new("down", PaletteDown, Some("Palette > Input")),
-            ]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            // One window is the whole app: closing it quits the process.
-            cx.on_window_closed(|cx| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
+        *async_slot.borrow_mut() = Some(cx.to_async());
+        gpui_component::init(cx);
+        theme::apply_ui_theme(cx);
+        cx.bind_keys([
+            KeyBinding::new("]", NextFile, Some("ReviewApp")),
+            KeyBinding::new("[", PrevFile, Some("ReviewApp")),
+            KeyBinding::new("v", ToggleViewed, Some("ReviewApp")),
+            KeyBinding::new("n", NextHunk, Some("ReviewApp")),
+            KeyBinding::new("p", PrevHunk, Some("ReviewApp")),
+            KeyBinding::new("home", GoToTop, Some("ReviewApp")),
+            KeyBinding::new("end", GoToBottom, Some("ReviewApp")),
+            KeyBinding::new("shift-v", ToggleView, Some("ReviewApp")),
+            KeyBinding::new("m", ToggleMinimap, Some("ReviewApp")),
+            KeyBinding::new("w", ToggleWrap, Some("ReviewApp")),
+            KeyBinding::new("cmd-shift-s", CaptureScreenshot, Some("ReviewApp")),
+            KeyBinding::new("c", ToggleComments, Some("ReviewApp")),
+            KeyBinding::new("r", Refresh, Some("ReviewApp")),
+            // Finish the review: approve / request changes / comment.
+            KeyBinding::new("cmd-enter", SubmitReview, Some("ReviewApp")),
+            // Only while the diff pane has focus; typing `/` in any input
+            // stays a plain character.
+            KeyBinding::new("/", FocusTreeFilter, Some("ReviewApp")),
+            // Selection: escape/cmd-c only fire while the diff pane has
+            // focus; with the palette open its input has focus, so the
+            // palette's own escape routing wins by construction.
+            KeyBinding::new("escape", ClearSelection, Some("ReviewApp")),
+            KeyBinding::new("cmd-c", CopySelection, Some("ReviewApp")),
+            KeyBinding::new("f12", GoToDefinition, Some("ReviewApp")),
+            KeyBinding::new("ctrl-tab", NextItem, Some("ReviewApp")),
+            KeyBinding::new("ctrl-shift-tab", PrevItem, Some("ReviewApp")),
+            KeyBinding::new("cmd-left", NavBack, Some("ReviewApp")),
+            KeyBinding::new("cmd-right", NavForward, Some("ReviewApp")),
+            KeyBinding::new("alt-left", NavBack, Some("ReviewApp")),
+            KeyBinding::new("alt-right", NavForward, Some("ReviewApp")),
+            KeyBinding::new("cmd-1", GoToItem1, Some("ReviewApp")),
+            KeyBinding::new("cmd-2", GoToItem2, Some("ReviewApp")),
+            KeyBinding::new("cmd-3", GoToItem3, Some("ReviewApp")),
+            KeyBinding::new("cmd-4", GoToItem4, Some("ReviewApp")),
+            KeyBinding::new("cmd-5", GoToItem5, Some("ReviewApp")),
+            KeyBinding::new("cmd-6", GoToItem6, Some("ReviewApp")),
+            KeyBinding::new("cmd-7", GoToItem7, Some("ReviewApp")),
+            KeyBinding::new("cmd-8", GoToItem8, Some("ReviewApp")),
+            KeyBinding::new("cmd-9", GoToItem9, Some("ReviewApp")),
+            // Zoom. Bind both "cmd-=" and "cmd-+" so it fires with or
+            // without shift, the way browsers and editors behave.
+            KeyBinding::new("cmd-=", ZoomIn, None),
+            KeyBinding::new("cmd-+", ZoomIn, None),
+            KeyBinding::new("cmd--", ZoomOut, None),
+            KeyBinding::new("cmd-0", ZoomReset, None),
+            // Global (None context): must work while the open input is focused.
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-j", ToggleChat, None),
+            KeyBinding::new("cmd-t", OpenInput, None),
+            KeyBinding::new("cmd-w", CloseItem, None),
+            KeyBinding::new("cmd-k", OpenPalette, None),
+            KeyBinding::new("cmd-q", Quit, None),
+            // Palette navigation. The `Palette > Input` variants are bound
+            // after gpui_component::init, so at the input's dispatch depth
+            // they take precedence over the Input's own up/down (which a
+            // single-line input consumes without propagating).
+            KeyBinding::new("up", PaletteUp, Some("Palette")),
+            KeyBinding::new("down", PaletteDown, Some("Palette")),
+            KeyBinding::new("escape", PaletteBack, Some("Palette")),
+            KeyBinding::new("up", PaletteUp, Some("Palette > Input")),
+            KeyBinding::new("down", PaletteDown, Some("Palette > Input")),
+        ]);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        // One window is the whole app: closing it quits the process.
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
 
-            let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
-            let review_slot = review_slot.clone();
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("lgtm".into()),
-                        ..TitleBar::title_bar_options()
-                    }),
-                    ..Default::default()
-                },
-                move |window, cx| {
-                    let view = cx.new(|cx| ReviewApp::new(sources, errors, window, cx));
-                    window.focus(&view.read(cx).focus_handle);
-                    *review_slot.borrow_mut() = Some(view.clone());
-                    cx.new(|cx| Root::new(view, window, cx))
-                },
-            )
-            .unwrap();
-            cx.activate(true);
-        });
+        let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);
+        let review_slot = review_slot.clone();
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("lgtm".into()),
+                    ..TitleBar::title_bar_options()
+                }),
+                ..Default::default()
+            },
+            move |window, cx| {
+                let view = cx.new(|cx| ReviewApp::new(sources, errors, window, cx));
+                window.focus(&view.read(cx).focus_handle);
+                *review_slot.borrow_mut() = Some(view.clone());
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        )
+        .unwrap();
+        cx.activate(true);
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -574,7 +577,12 @@ fn locate_in_file(file_rows: &[usize], row: usize) -> (Option<usize>, usize) {
 /// Inverse of [`locate_in_file`]: the row for `file` + `file_offset` in the
 /// (possibly rebuilt) `file_rows`, clamped to that file's row range and to
 /// the last row overall.
-fn resolve_in_file(file_rows: &[usize], rows_len: usize, file: Option<usize>, offset: usize) -> usize {
+fn resolve_in_file(
+    file_rows: &[usize],
+    rows_len: usize,
+    file: Option<usize>,
+    offset: usize,
+) -> usize {
     match file.and_then(|fx| file_rows.get(fx).copied()) {
         Some(start) => {
             let end = file
@@ -1433,8 +1441,26 @@ fn push_gap_rows(
                 }),
             },
         });
-        push_thread_rows(rows, anchors, path, CommentSide::Left, Some(old_no), now, ViewMode::Split, wrap);
-        push_thread_rows(rows, anchors, path, CommentSide::Right, Some(new_no), now, ViewMode::Split, wrap);
+        push_thread_rows(
+            rows,
+            anchors,
+            path,
+            CommentSide::Left,
+            Some(old_no),
+            now,
+            ViewMode::Split,
+            wrap,
+        );
+        push_thread_rows(
+            rows,
+            anchors,
+            path,
+            CommentSide::Right,
+            Some(new_no),
+            now,
+            ViewMode::Split,
+            wrap,
+        );
     }
 }
 
@@ -1452,7 +1478,13 @@ fn file_signature(file: &FileDiff) -> u64 {
     file.deletions.hash(&mut h);
     file.status.hash(&mut h);
     for hunk in &file.hunks {
-        (hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count).hash(&mut h);
+        (
+            hunk.old_start,
+            hunk.old_count,
+            hunk.new_start,
+            hunk.new_count,
+        )
+            .hash(&mut h);
         for row in &hunk.rows {
             match row {
                 DiffRow::Context { text, .. }
@@ -1469,7 +1501,11 @@ fn file_signature(file: &FileDiff) -> u64 {
 /// `ItemData::file_rows`). Falls back to the nearest file-header row
 /// regardless of viewed state when every remaining one is viewed, so an
 /// all-viewed diff doesn't get stuck.
-fn next_unviewed_target(targets: &[usize], viewed: &HashSet<usize>, cursor: usize) -> Option<usize> {
+fn next_unviewed_target(
+    targets: &[usize],
+    viewed: &HashSet<usize>,
+    cursor: usize,
+) -> Option<usize> {
     targets
         .iter()
         .enumerate()
@@ -1479,7 +1515,11 @@ fn next_unviewed_target(targets: &[usize], viewed: &HashSet<usize>, cursor: usiz
 }
 
 /// Mirrors [`next_unviewed_target`], searching backwards.
-fn prev_unviewed_target(targets: &[usize], viewed: &HashSet<usize>, cursor: usize) -> Option<usize> {
+fn prev_unviewed_target(
+    targets: &[usize],
+    viewed: &HashSet<usize>,
+    cursor: usize,
+) -> Option<usize> {
     targets
         .iter()
         .enumerate()
@@ -1693,8 +1733,26 @@ fn build_rows_impl(
                                 syntax,
                             },
                         });
-                        push_thread_rows(&mut rows, anchors, path, CommentSide::Left, old_no, now, ViewMode::Unified, wrap);
-                        push_thread_rows(&mut rows, anchors, path, CommentSide::Right, new_no, now, ViewMode::Unified, wrap);
+                        push_thread_rows(
+                            &mut rows,
+                            anchors,
+                            path,
+                            CommentSide::Left,
+                            old_no,
+                            now,
+                            ViewMode::Unified,
+                            wrap,
+                        );
+                        push_thread_rows(
+                            &mut rows,
+                            anchors,
+                            path,
+                            CommentSide::Right,
+                            new_no,
+                            now,
+                            ViewMode::Unified,
+                            wrap,
+                        );
                     }
                 }
                 ViewMode::Split => {
@@ -1736,7 +1794,8 @@ fn build_rows_impl(
                                     CommentSide::Left,
                                     Some(*old_no),
                                     now,
-                                    ViewMode::Split, wrap,
+                                    ViewMode::Split,
+                                    wrap,
                                 );
                                 push_thread_rows(
                                     &mut rows,
@@ -1745,7 +1804,8 @@ fn build_rows_impl(
                                     CommentSide::Right,
                                     Some(*new_no),
                                     now,
-                                    ViewMode::Split, wrap,
+                                    ViewMode::Split,
+                                    wrap,
                                 );
                                 i += 1;
                             }
@@ -1772,7 +1832,8 @@ fn build_rows_impl(
                                     CommentSide::Right,
                                     Some(*new_no),
                                     now,
-                                    ViewMode::Split, wrap,
+                                    ViewMode::Split,
+                                    wrap,
                                 );
                                 i += 1;
                             }
@@ -1827,7 +1888,8 @@ fn build_rows_impl(
                                         CommentSide::Left,
                                         left_no,
                                         now,
-                                        ViewMode::Split, wrap,
+                                        ViewMode::Split,
+                                        wrap,
                                     );
                                     push_thread_rows(
                                         &mut rows,
@@ -1836,7 +1898,8 @@ fn build_rows_impl(
                                         CommentSide::Right,
                                         right_no,
                                         now,
-                                        ViewMode::Split, wrap,
+                                        ViewMode::Split,
+                                        wrap,
                                     );
                                 }
                             }
@@ -2112,7 +2175,11 @@ fn render_row(
                 inner.into_any_element(),
                 *half,
                 true,
-                if *top { CardEdge::Top } else { CardEdge::Middle },
+                if *top {
+                    CardEdge::Top
+                } else {
+                    CardEdge::Middle
+                },
             )
         }
         Row::CommentBody { line, half } => comment_row(
@@ -3652,8 +3719,14 @@ fn fetch_item(source: &Source, mode: ViewMode) -> anyhow::Result<Loaded> {
         }
     };
     let diff = diff_core::parse_patch(&patch);
-    let (rows, file_rows, hunk_rows) =
-        build_rows(&diff, mode, &HashMap::new(), comments.as_ref(), true, COMMENT_WRAP_CHARS);
+    let (rows, file_rows, hunk_rows) = build_rows(
+        &diff,
+        mode,
+        &HashMap::new(),
+        comments.as_ref(),
+        true,
+        COMMENT_WRAP_CHARS,
+    );
     Ok(Loaded {
         meta,
         diff,
@@ -4203,11 +4276,17 @@ fn home_rows(
 /// What pressing Enter on the repo-home step should do.
 #[derive(Debug, Clone, PartialEq)]
 enum HomeAction {
-    OpenPr { slug: String, number: u64 },
+    OpenPr {
+        slug: String,
+        number: u64,
+    },
     OpenRepo(String),
     OpenFolder,
     /// The query is a valid `owner/repo` not represented by any row — open it.
-    FetchRepo { owner: String, repo: String },
+    FetchRepo {
+        owner: String,
+        repo: String,
+    },
     Nothing,
 }
 
@@ -5980,9 +6059,10 @@ impl ReviewApp {
             // offset.y is negative when scrolled down.
             let top_row = (f32::from(-offset.y) / row_height()).floor() as usize;
             if gap_row < top_row {
-                scroll
-                    .base_handle
-                    .set_offset(point(offset.x, offset.y - px(inserted as f32 * row_height())));
+                scroll.base_handle.set_offset(point(
+                    offset.x,
+                    offset.y - px(inserted as f32 * row_height()),
+                ));
             }
         }
         cx.notify();
@@ -6258,7 +6338,9 @@ impl ReviewApp {
                 self.palette_open_recent_pr(&slug, number, window, cx)
             }
             HomeAction::OpenRepo(slug) => self.palette_home_activate(&slug, window, cx),
-            HomeAction::FetchRepo { owner, repo } => self.palette_fetch_prs(owner, repo, window, cx),
+            HomeAction::FetchRepo { owner, repo } => {
+                self.palette_fetch_prs(owner, repo, window, cx)
+            }
             HomeAction::OpenFolder => {
                 self.close_palette(window, cx);
                 self.prompt_open_folder(cx);
@@ -8956,11 +9038,16 @@ impl ReviewApp {
             .iter()
             .enumerate()
             .filter(|(_, c)| {
-                !open_pr_keys.iter().any(|(o, r, n)| {
-                    *o == c.loc.owner && *r == c.loc.repo && *n == c.loc.number
-                })
+                !open_pr_keys
+                    .iter()
+                    .any(|(o, r, n)| *o == c.loc.owner && *r == c.loc.repo && *n == c.loc.number)
             })
-            .map(|(ix, c)| (ix, SharedString::from(format!("{}#{}", c.loc.repo_slug(), c.loc.number))))
+            .map(|(ix, c)| {
+                (
+                    ix,
+                    SharedString::from(format!("{}#{}", c.loc.repo_slug(), c.loc.number)),
+                )
+            })
             .collect();
         if !cached.is_empty() {
             list = list.child(
@@ -8983,9 +9070,9 @@ impl ReviewApp {
                     .rounded_md()
                     .cursor_pointer()
                     .hover(|style| style.bg(Hsla::from(theme::surface0()).opacity(0.5)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_cached_pr(ix, window, cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_cached_pr(ix, window, cx)),
+                    )
                     .child(
                         div()
                             .flex()
@@ -9938,7 +10025,9 @@ impl Render for ReviewApp {
                                 })
                                 .track_scroll(data.scroll.clone())
                                 .with_horizontal_sizing_behavior(match data.mode {
-                                    ViewMode::Unified => ListHorizontalSizingBehavior::Unconstrained,
+                                    ViewMode::Unified => {
+                                        ListHorizontalSizingBehavior::Unconstrained
+                                    }
                                     ViewMode::Split => ListHorizontalSizingBehavior::FitList,
                                 })
                                 .size_full(),
@@ -10446,7 +10535,14 @@ mod tests {
 
     #[test]
     fn split_context_fills_both_cells() {
-        let (rows, _, _) = build_rows(&sample_diff(), ViewMode::Split, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &sample_diff(),
+            ViewMode::Split,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         // rows[0] = FileHeader, rows[1] = HunkHeader, rows[2] = first context.
         match &rows[2] {
             Row::SplitLine { left, right } => {
@@ -10459,7 +10555,14 @@ mod tests {
 
     #[test]
     fn split_pairs_equal_runs_positionally() {
-        let (rows, _, _) = build_rows(&sample_diff(), ViewMode::Split, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &sample_diff(),
+            ViewMode::Split,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         match &rows[3] {
             Row::SplitLine { left, right } => {
                 assert_eq!(cell(left), (2, LineKind::Removed, "old1", &[0..3][..]));
@@ -10486,8 +10589,14 @@ mod tests {
 
     #[test]
     fn split_unequal_and_lone_runs_are_one_sided() {
-        let (rows, _, hunk_rows) =
-            build_rows(&sample_diff(), ViewMode::Split, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, hunk_rows) = build_rows(
+            &sample_diff(),
+            ViewMode::Split,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         let h2 = hunk_rows[1];
         // 2 removed / 1 added: first row paired, second left-only.
         match &rows[h2 + 1] {
@@ -10578,7 +10687,8 @@ mod tests {
     fn upgraded_file_gets_gap_rows_and_marked_headers() {
         let (diff, upgrades) = upgraded_diff();
         for mode in [ViewMode::Unified, ViewMode::Split] {
-            let (rows, _, hunk_rows) = build_rows(&diff, mode, &upgrades, None, true, COMMENT_WRAP_CHARS);
+            let (rows, _, hunk_rows) =
+                build_rows(&diff, mode, &upgrades, None, true, COMMENT_WRAP_CHARS);
             // FileHeader, Gap(6), HunkHeader, 7 hunk rows, Gap(7).
             match &rows[1] {
                 Row::Gap {
@@ -10601,7 +10711,14 @@ mod tests {
             assert!(row_side_text(&rows[1], SelSide::Left).is_none());
         }
         // Un-upgraded build of the same diff has no gap rows.
-        let (rows, _, _) = build_rows(&diff, ViewMode::Unified, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         assert!(!rows.iter().any(|row| matches!(row, Row::Gap { .. })));
         assert!(matches!(
             rows[1],
@@ -10617,7 +10734,14 @@ mod tests {
         let (diff, mut upgrades) = upgraded_diff();
         upgrades.get_mut(&0).unwrap().expanded.insert(0);
 
-        let (rows, _, hunk_rows) = build_rows(&diff, ViewMode::Unified, &upgrades, None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, hunk_rows) = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &upgrades,
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         // Leading gap expanded into 6 context rows before the hunk header.
         assert_eq!(hunk_rows, vec![7]); // FileHeader + 6 context rows
         for (j, row) in rows[1..7].iter().enumerate() {
@@ -10641,7 +10765,14 @@ mod tests {
         assert!(matches!(rows.last(), Some(Row::Gap { gap_ix: 1, .. })));
 
         // Split mode: same expansion as two-cell context rows.
-        let (rows, _, _) = build_rows(&diff, ViewMode::Split, &upgrades, None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &diff,
+            ViewMode::Split,
+            &upgrades,
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         match &rows[1] {
             Row::SplitLine { left, right } => {
                 let (l, r) = (left.as_ref().unwrap(), right.as_ref().unwrap());
@@ -10655,7 +10786,14 @@ mod tests {
 
         // Expanding the trailing gap too: numbering continues past the hunk.
         upgrades.get_mut(&0).unwrap().expanded.insert(1);
-        let (rows, _, _) = build_rows(&diff, ViewMode::Unified, &upgrades, None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &upgrades,
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         assert!(!rows.iter().any(|row| matches!(row, Row::Gap { .. })));
         match rows.last().unwrap() {
             Row::Line {
@@ -10743,7 +10881,15 @@ index 0000000..1111111 100644
  fn five() {}
 ";
         let diff = diff_core::parse_patch(patch);
-        let base = build_rows(&diff, ViewMode::Unified, &HashMap::new(), None, true, COMMENT_WRAP_CHARS).0;
+        let base = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        )
+        .0;
 
         // Narrow: the long added line wraps into several continuation rows.
         let (narrow, _, _) = wrap_rows(base.clone(), 20);
@@ -10802,7 +10948,10 @@ index 0000000..1111111 100644
         let (top_file0, top_offset0) = locate_in_file(&old_file_rows, 5); // file 0, offset 5
         assert_eq!(top_file0, Some(0));
         let resolved = resolve_in_file(&new_file_rows, new_rows_len, top_file0, top_offset0);
-        assert_eq!(resolved, 0, "clamped to file 0's only remaining row (its header)");
+        assert_eq!(
+            resolved, 0,
+            "clamped to file 0's only remaining row (its header)"
+        );
     }
 
     #[test]
@@ -10938,7 +11087,14 @@ index 0000000..1111111 100644
  }
 ";
         let diff = diff_core::parse_patch(patch);
-        let (rows, _, _) = build_rows(&diff, ViewMode::Unified, &HashMap::new(), None, false, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &HashMap::new(),
+            None,
+            false,
+            COMMENT_WRAP_CHARS,
+        );
         let highlighted_lines = rows
             .iter()
             .filter(|row| matches!(row, Row::Line { syntax, .. } if !syntax.is_empty()))
@@ -11262,17 +11418,34 @@ index 0000000..1111111 100644
         // with the repo slug. Enter on a highlighted PR must open THAT PR, not
         // re-open the repo list.
         let rows = vec![
-            HomeRow::Pr { slug: "a/api".into(), number: 188, title: "one".into() },
-            HomeRow::Pr { slug: "a/api".into(), number: 669, title: "two".into() },
-            HomeRow::Repo { slug: "a/api".into(), pinned: true },
+            HomeRow::Pr {
+                slug: "a/api".into(),
+                number: 188,
+                title: "one".into(),
+            },
+            HomeRow::Pr {
+                slug: "a/api".into(),
+                number: 669,
+                title: "two".into(),
+            },
+            HomeRow::Repo {
+                slug: "a/api".into(),
+                pinned: true,
+            },
         ];
         // selected = the second PR, query = the leftover valid slug
         assert_eq!(
             home_confirm_action(&rows, 1, "a/api"),
-            HomeAction::OpenPr { slug: "a/api".into(), number: 669 }
+            HomeAction::OpenPr {
+                slug: "a/api".into(),
+                number: 669
+            }
         );
         // highlighted repo row → open its PR list
-        assert_eq!(home_confirm_action(&rows, 2, "a/api"), HomeAction::OpenRepo("a/api".into()));
+        assert_eq!(
+            home_confirm_action(&rows, 2, "a/api"),
+            HomeAction::OpenRepo("a/api".into())
+        );
     }
 
     #[test]
@@ -11283,10 +11456,16 @@ index 0000000..1111111 100644
         assert!(rows.is_empty());
         assert_eq!(
             home_confirm_action(&rows, 0, "acme/newrepo"),
-            HomeAction::FetchRepo { owner: "acme".into(), repo: "newrepo".into() }
+            HomeAction::FetchRepo {
+                owner: "acme".into(),
+                repo: "newrepo".into()
+            }
         );
         // gibberish query, nothing selected → no-op
-        assert_eq!(home_confirm_action(&[], 0, "not a slug"), HomeAction::Nothing);
+        assert_eq!(
+            home_confirm_action(&[], 0, "not a slug"),
+            HomeAction::Nothing
+        );
     }
 
     #[test]
@@ -11452,7 +11631,8 @@ index 0000000..1111111 100644
     fn header_indices_are_correct_in_both_modes() {
         let diff = sample_diff();
         for mode in [ViewMode::Unified, ViewMode::Split] {
-            let (rows, file_rows, hunk_rows) = build_rows(&diff, mode, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+            let (rows, file_rows, hunk_rows) =
+                build_rows(&diff, mode, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
             assert_eq!(file_rows.len(), 2);
             assert_eq!(hunk_rows.len(), 2);
             for &ix in &file_rows {
@@ -11465,8 +11645,22 @@ index 0000000..1111111 100644
             assert!(matches!(rows[file_rows[1] + 1], Row::Binary));
         }
         // Unified emits one row per diff row; split collapses the equal run.
-        let (unified, _, _) = build_rows(&diff, ViewMode::Unified, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
-        let (split, _, _) = build_rows(&diff, ViewMode::Split, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (unified, _, _) = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
+        let (split, _, _) = build_rows(
+            &diff,
+            ViewMode::Split,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         let unified_lines = unified
             .iter()
             .filter(|r| matches!(r, Row::Line { .. }))
@@ -11547,8 +11741,14 @@ index 0000000..1111111 100644
 
         // Rows as the background thread would have built them: expanded,
         // since it has no access to the store.
-        let (rows, file_rows, hunk_rows) =
-            build_rows(&diff, ViewMode::Unified, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (rows, file_rows, hunk_rows) = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         assert!(
             rows[file_rows[0]..file_rows[1]]
                 .iter()
@@ -11581,7 +11781,10 @@ index 0000000..1111111 100644
         let ItemState::Ready(data) = &item.state else {
             panic!("expected item to be Ready after install");
         };
-        assert!(data.viewed.contains(&0), "resolve_viewed should mark file 0 viewed");
+        assert!(
+            data.viewed.contains(&0),
+            "resolve_viewed should mark file 0 viewed"
+        );
         match &data.rows[data.file_rows[0]] {
             Row::FileHeader { viewed, .. } => assert!(*viewed, "header should render as viewed"),
             other => panic!("expected file header, got {}", row_name(other)),
@@ -11816,7 +12019,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             None,
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         let mm = minimap_rows(&rows);
         assert_eq!(mm.len(), rows.len());
@@ -11834,7 +12037,14 @@ index 0000000..1111111 100644
 
     #[test]
     fn minimap_rows_split_pairs_and_gaps() {
-        let (rows, _, _) = build_rows(&sample_diff(), ViewMode::Split, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &sample_diff(),
+            ViewMode::Split,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         let mm = minimap_rows(&rows);
         assert_eq!(mm.len(), rows.len());
         // Context pair: both halves, no change flags.
@@ -12328,7 +12538,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             Some(&index),
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         // rows: FileHeader, HunkHeader, ctx, rem old1 (old_no 2) + LEFT
         // thread, rem old2, add new1 (new_no 2) + RIGHT thread, …
@@ -12409,7 +12619,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             Some(&index),
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         // rows[3] pairs old1/new1 (both line 2): LEFT thread then RIGHT
         // thread directly beneath it.
@@ -12451,12 +12661,11 @@ index 0000000..1111111 100644
             &HashMap::new(),
             Some(&index),
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         // rows[4..7] are carol's LEFT thread, rows[7..12] the RIGHT one; each
         // row of a thread carries the side it was anchored to.
-        let halves: Vec<Option<Option<CommentSide>>> =
-            rows[4..12].iter().map(row_half).collect();
+        let halves: Vec<Option<Option<CommentSide>>> = rows[4..12].iter().map(row_half).collect();
         assert_eq!(
             halves,
             vec![
@@ -12539,7 +12748,10 @@ index 0000000..1111111 100644
         let chrome = COMMENT_CARD_CHROME;
         // Unified uses the whole width; split only its half, so the same pane
         // yields roughly half the columns.
-        assert_eq!(comment_wrap_cols(chrome + 40. * cw, ViewMode::Unified, cw), 40);
+        assert_eq!(
+            comment_wrap_cols(chrome + 40. * cw, ViewMode::Unified, cw),
+            40
+        );
         let split_pane = 2. * (chrome + 40. * cw) + SPLIT_DIVIDER;
         assert_eq!(comment_wrap_cols(split_pane, ViewMode::Split, cw), 40);
         // A roomy pane stops widening at the readability cap...
@@ -12563,7 +12775,11 @@ index 0000000..1111111 100644
     fn comment_bodies_wrap_to_the_requested_column_width() {
         // One long prose line plus an unbreakable token (a URL), the two ways a
         // body runs past the card.
-        let body = format!("{} https://example.com/{}", "word ".repeat(60), "x".repeat(200));
+        let body = format!(
+            "{} https://example.com/{}",
+            "word ".repeat(60),
+            "x".repeat(200)
+        );
         let index = group_comments(vec![rc(
             1,
             "a.rs",
@@ -12578,8 +12794,14 @@ index 0000000..1111111 100644
             ("unified", ViewMode::Unified, COMMENT_WRAP_CHARS),
             ("split", ViewMode::Split, 40),
         ] {
-            let (rows, _, _) =
-                build_rows(&sample_diff(), mode, &HashMap::new(), Some(&index), true, cap);
+            let (rows, _, _) = build_rows(
+                &sample_diff(),
+                mode,
+                &HashMap::new(),
+                Some(&index),
+                true,
+                cap,
+            );
             let bodies: Vec<&SharedString> = rows
                 .iter()
                 .filter_map(|row| match row {
@@ -12607,7 +12829,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             Some(&index),
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         // Unified has one column, so no comment row is confined to a half.
         assert!(rows.iter().filter_map(row_half).all(|half| half.is_none()));
@@ -12624,7 +12846,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             Some(&index),
             false,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         assert!(!rows.iter().any(is_comment_row));
         match &rows[0] {
@@ -12642,7 +12864,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             None,
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         assert!(!rows.iter().any(is_comment_row));
         match &rows[0] {
@@ -12669,11 +12891,25 @@ index 0000000..1111111 100644
             "2026-01-01T00:00:00Z",
             None,
         )]);
-        let (rows, _, _) = build_rows(&diff, ViewMode::Unified, &upgrades, Some(&index), true, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &upgrades,
+            Some(&index),
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         // Collapsed gap: the thread has no anchor row and stays hidden.
         assert!(!rows.iter().any(is_comment_row));
         upgrades.get_mut(&0).unwrap().expanded.insert(0);
-        let (rows, _, _) = build_rows(&diff, ViewMode::Unified, &upgrades, Some(&index), true, COMMENT_WRAP_CHARS);
+        let (rows, _, _) = build_rows(
+            &diff,
+            ViewMode::Unified,
+            &upgrades,
+            Some(&index),
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         // FileHeader, ctx 1, ctx 2, ctx 3, then the thread.
         assert_eq!(row_name(&rows[3]), "Line");
         assert_eq!(row_name(&rows[4]), "CommentHeader");
@@ -12690,7 +12926,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             Some(&index),
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         // Headers and comment rows anchor nothing.
         assert_eq!(comment_anchor(&rows, 0, SelSide::Unified), None);
@@ -12709,8 +12945,14 @@ index 0000000..1111111 100644
             Some((CommentSide::Right, 2))
         );
         // Split: the half under the pointer decides; absent cells refuse.
-        let (rows, _, hunk_rows) =
-            build_rows(&sample_diff(), ViewMode::Split, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (rows, _, hunk_rows) = build_rows(
+            &sample_diff(),
+            ViewMode::Split,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         assert_eq!(
             comment_anchor(&rows, 3, SelSide::Left),
             Some((CommentSide::Left, 2))
@@ -12763,7 +13005,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             None,
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         let (with, _, _) = build_rows(
             &sample_diff(),
@@ -12771,7 +13013,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             Some(&index),
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         // Every plain row maps to the same row content with comments shown.
         for (n, row) in plain.iter().enumerate() {
@@ -13030,7 +13272,7 @@ index 0000000..1111111 100644
             &HashMap::new(),
             None,
             true,
-                COMMENT_WRAP_CHARS,
+            COMMENT_WRAP_CHARS,
         );
         // rows: FileHeader, HunkHeader, ctx(1,1 "ctx"), rem(2 "old1"),
         // rem(3 "old2"), add(2 "new1"), …
@@ -13045,8 +13287,14 @@ index 0000000..1111111 100644
         assert_eq!(info.note(), "› included selection: a.rs:1-3");
 
         // Split selection locked to the right side.
-        let (rows, file_rows, _) =
-            build_rows(&sample_diff(), ViewMode::Split, &HashMap::new(), None, true, COMMENT_WRAP_CHARS);
+        let (rows, file_rows, _) = build_rows(
+            &sample_diff(),
+            ViewMode::Split,
+            &HashMap::new(),
+            None,
+            true,
+            COMMENT_WRAP_CHARS,
+        );
         let right = sel(SelSide::Right, (3, 0), (4, 4));
         let info = selection_info(&right, &rows, &file_rows, &sample_diff()).unwrap();
         assert_eq!(info.side, "RIGHT (new)");

@@ -680,8 +680,11 @@ mod tests {
         // Older gh output without the fields still deserializes.
         let json = json
             .replace(r#", "reviewDecision": "CHANGES_REQUESTED""#, "")
-            .replace(r#",
-            "mergeable": "CONFLICTING""#, "");
+            .replace(
+                r#",
+            "mergeable": "CONFLICTING""#,
+                "",
+            );
         let meta: PrMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(meta.review_decision, "");
         assert_eq!(meta.mergeable, "");
